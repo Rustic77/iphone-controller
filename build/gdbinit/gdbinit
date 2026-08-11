@@ -1,0 +1,2 @@
+source C:/esp/iphone-controller/build/gdbinit/symbols
+source C:/esp/iphone-controller/build/gdbinit/connect
