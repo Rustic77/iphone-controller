@@ -18,3 +18,11 @@ controllerplatform/devices.json
 controllerplatform/node_modules/
 controllerplatform/dist/
 controllerplatform/*.log
+
+# Nested project artifacts
+controllerplatform/node_modules/
+controllerplatform/.env
+controllerplatform/devices.json
+removevideostreaming/**/bin/
+removevideostreaming/**/obj/
+removevideostreaming/.vs/

@@ -74,11 +74,17 @@
     for (const d of devices) {
       const row = document.createElement("div");
       row.className = "device";
+      const controlOn = !!(d.controllerOnline ?? d.online);
+      const videoOn = !!d.videoAgentOnline;
       row.innerHTML = `
-        <span class="dot ${d.online ? "online" : ""}"></span>
+        <span class="dot ${controlOn || videoOn ? "online" : ""}"></span>
         <div>
           <div class="name">${escapeHtml(d.name)}</div>
-          <div class="meta muted">${d.online ? "online" : "offline"} · last seen ${fmtLastSeen(d.lastSeen)}
+          <div class="meta muted">
+            control ${controlOn ? "online" : "offline"}
+            · video ${videoOn ? "online" : "offline"}
+            ${d.videoStreaming ? "· streaming" : ""}
+            · last seen ${fmtLastSeen(d.lastSeen)}
             ${d.busy ? '· <span class="badge">in use</span>' : ""}
             ${d.controlledByYou ? '· <span class="badge">you</span>' : ""}
           </div>
@@ -87,7 +93,7 @@
       const btn = document.createElement("button");
       btn.className = "primary";
       btn.textContent = "Control";
-      btn.disabled = !d.online || (d.busy && !d.controlledByYou);
+      btn.disabled = (!controlOn && !videoOn) || (d.busy && !d.controlledByYou);
       btn.onclick = () => {
         location.href = "/controller.html?device=" + encodeURIComponent(d.id);
       };

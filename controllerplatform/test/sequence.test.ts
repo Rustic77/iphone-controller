@@ -71,8 +71,10 @@ describe("Hub sequence handling", () => {
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
     hub.handleBrowserMessage("c1", { type: "input", seq: 1, ts: clock.now(), event: { kind: "move", dx: 7, dy: 0 } });
 
+    // Device seq is hub-owned per control session (resets on claim), independent
+    // of the browser's wire seq used only for dedup/staleness.
     const forwarded = device.ofType("input");
-    expect(forwarded.map((m) => m.seq)).toEqual([100, 1]);
+    expect(forwarded.map((m) => m.seq)).toEqual([1, 1]);
   });
 
   it("stamps forwarded input with the control-session id, which changes per claim", () => {

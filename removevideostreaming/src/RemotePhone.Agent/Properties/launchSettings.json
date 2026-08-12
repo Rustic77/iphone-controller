@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "RemotePhone.Agent (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "RemotePhone.Agent (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

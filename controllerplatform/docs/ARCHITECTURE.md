@@ -4,7 +4,8 @@
 
 Let an authenticated operator control a USB-HID iPhone rig (driven by an
 ESP32-S3) from a browser, over the Internet, **without exposing the ESP32** to
-inbound connections or requiring router port forwarding.
+inbound connections or requiring router port forwarding — and independently
+receive a live AirPlay-captured video stream from a Windows agent via WebRTC.
 
 ## Topology
 
@@ -12,26 +13,32 @@ inbound connections or requiring router port forwarding.
    Browser (operator UI)
       │  HTTPS + WSS  (session token)
       ▼
-┌─────────────────────────────┐
-│   Cloud control server      │   ← this repo
-│                             │
-│   • Fastify (HTTP + static) │
-│   • ws (WebSocket relay)    │
-│   • Hub (routing + policy)  │
-└─────────────────────────────┘
-      ▲
-      │  outbound WSS/TLS  (device secret)
-      │
-   ESP32-S3 firmware
-      │  USB HID (mouse + keyboard)
-      ▼
-   iPhone
+┌─────────────────────────────────┐
+│   Cloud control server          │   ← this repo
+│                                 │
+│   • Fastify (HTTP + static)     │
+│   • ws (WebSocket relay)        │
+│   • Hub (routing + policy)      │
+│   • PointerCalibration          │
+└─────────────────────────────────┘
+      ▲                    ▲
+      │ CONTROL            │ VIDEO
+      │ outbound WSS       │ outbound WS/WSS
+      │ (device secret)    │ (device secret + agent id)
+      │                    │
+   ESP32-S3             Windows video agent
+      │  USB HID            │  AirPlay window capture
+      ▼                     │  WebRTC media
+   iPhone  ◄── AirPlay ─────┘
 ```
 
-Key property: **the ESP32 initiates the connection outward** to the server. The
-server is the only publicly reachable component. This removes the need to expose
-the device or forward ports, and it means firewalls/NAT on the device side are
-never in the way.
+Key properties:
+
+1. **The ESP32 initiates the connection outward** to the server (CONTROL).
+2. **The Windows agent initiates outward** to `/ws/agent` (VIDEO).
+3. **CONTROL and VIDEO never share a transport.** HID commands never go through
+   the agent; media never goes through the ESP. Either path can be up while the
+   other is down.
 
 ## Components
 
@@ -43,100 +50,104 @@ never in the way.
 - Emits structured JSON logs (pino).
 
 ### WebSocket layer (`src/server.ts`)
-Two logical endpoints, authenticated **at the HTTP upgrade** before any relay
-logic runs:
+Three logical endpoints, authenticated **at the HTTP upgrade**:
 
 - `/ws/browser?token=…` — operator sockets. Token verified by `SessionManager`.
-- `/ws/device` — device sockets. `x-device-id` + `x-device-secret` headers
-  verified by the device store. (Query params are accepted as a fallback for
-  browser-based testing.)
+- `/ws/device` — ESP sockets. `x-device-id` + `x-device-secret`.
+- `/ws/agent` — Windows video agent. `x-device-id` + `x-agent-secret`
+  (verified via `deviceStore.verifyDevice`) + `x-agent-id`.
 
-Both are `ws` servers in `noServer` mode; a single `upgrade` handler routes by
-path, authenticates, and only then calls `handleUpgrade`. Failed auth ⇒ `401`
-and the socket is destroyed.
+All are `ws` servers in `noServer` mode; a single `upgrade` handler routes by
+path, authenticates, and only then calls `handleUpgrade`. Failed auth ⇒ `401`.
 
-Each accepted browser socket gets a fresh **connection id** (`clientId`),
-independent of the auth session, so two browser tabs sharing one token are two
-independent control clients.
+Agent message types are normalized from PascalCase aliases to snake_case so the
+existing Windows agent and the browser UI share one hub.
 
 ### The Hub (`src/hub.ts`)
-The relay core and policy engine. It is **transport-agnostic**: it talks to
-sockets only through a tiny `Transport` interface (`send` / `close`), which is
-what makes it fully unit-testable without real networking. Responsibilities:
+The relay core and policy engine. Transport-agnostic via `Transport`
+(`send` / `close`). Responsibilities:
 
-- Track connected devices (online/offline, last-seen, current controller).
-- Track connected browser clients (which device each controls).
-- Enforce the security invariants (below).
-- Route validated input from a browser to exactly the device it controls.
-- Fan out device-list updates to the owning operator's browser clients.
+- Track connected ESP devices (online/offline, last-seen, current controller).
+- Track connected video agents per `deviceId` (`streaming`, `webRtcConnected`,
+  `videoSessionId`).
+- Track browser clients (control claim + optional video subscription).
+- Enforce tenant isolation and single-controller rules.
+- Route HID input to the claimed ESP only.
+- Relay WebRTC signaling **only** between an owner browser (claimed or
+  video-subscribed) and the agent for the **same** `deviceId`; reject wrong
+  device and stale `sessionId`.
+- Fan out device-list / video-status updates to owning browsers.
+- Audit-log control/video session and connect/disconnect events (no secrets).
+
+### Pointer calibration (`src/pointerCalibration.ts`)
+Relative-HID planner used for video taps:
+
+- Defaults to 1179×2556 portrait; landscape swaps axes.
+- `calibrate_pointer` → many `move(-40,-40)` → estimated `(0,0)` → `READY`.
+- `tap_normalized` → chunked relative moves + left click down/up.
+- States: `UNCALIBRATED | CALIBRATING | READY | INVALID`.
+- Orientation metadata from the agent invalidates calibration.
 
 ### Sequence tracker (`src/sequenceTracker.ts`)
-Per-control-session gate that drops duplicate/out-of-order (`seq <= last`) and
-stale (`now - ts > staleMs`) commands. A new tracker is created on every claim,
-so each control session has its own sequence space.
+Per-control-session gate that drops duplicate/out-of-order and stale browser
+commands. The hub maintains a separate monotonic **device outbound seq** so
+synthetic calibrate/tap batches never collide with browser wire seqs.
 
 ### Credential model
 See [Credential model](#credential-model).
 
 ## Security invariants
 
-1. **No unauthenticated control.** Every WebSocket upgrade is authenticated
-   before the socket is accepted.
-2. **Tenant isolation.** Each device has an `ownerId`. A browser client may only
-   list, claim, or control devices whose `ownerId` equals its authenticated
-   `userId`. Claiming a device you don't own returns `not_found` (existence is
-   not revealed).
-3. **Routed, not broadcast.** Input is delivered only to the single device the
-   sending client currently controls, and only while `device.controllingSessionId`
-   still equals that client. One user's input can never reach another user's
-   device.
-4. **Single controller.** A device is controlled by at most one client at a time;
-   a second claim gets `busy`.
-5. **Fail safe on disconnect.** If the controlling browser drops, the device is
-   told to `release_all` (drop all HID buttons/keys). If the device drops, the
-   controlling browser is told immediately and its claim is cleared.
+1. **No unauthenticated control or video.** Every WebSocket upgrade is
+   authenticated before the socket is accepted.
+2. **Tenant isolation.** A browser may only list, claim, subscribe, or signal
+   devices whose `ownerId` equals its `userId`.
+3. **Routed, not broadcast.** HID input goes only to the claimed device.
+   WebRTC signaling goes only to the matching device's agent / subscribed
+   browsers.
+4. **Single controller.** A device is controlled by at most one client at a
+   time; a second claim gets `busy`. Video subscribe is per-browser and does
+   not grant HID control.
+5. **Fail safe on disconnect.** Controlling browser drop ⇒ ESP `release_all`.
+   Agent drop ⇒ video_status offline for watchers; control claim is unaffected.
+6. **Stale video sessions.** WebRTC messages with a non-current `sessionId`
+   are rejected.
 
 ## Lifecycle flows
 
-### Device comes online
+### Device (ESP) comes online
 ```
-ESP32 ──WSS──▶ /ws/device (id+secret)
-server: verifyDevice → Hub.addDevice → mark online, send {hello}
-server → owner's browsers: {devices} snapshot (device now online)
+ESP ──WSS──▶ /ws/device (id+secret)
+server: verifyDevice → Hub.addDevice → {hello}
+server → owner's browsers: {devices} (controllerOnline=true)
 ```
 
-### Operator claims + controls
+### Video agent comes online
+```
+Agent ──WS──▶ /ws/agent (id+agent-id+secret)
+server: verifyDevice → Hub.addVideoAgent → {registered}
+server → owner's browsers: {devices} (videoAgentOnline=true)
+```
+
+### Operator claims + video + tap
 ```
 browser → {claim, deviceId}
-Hub: owner? online? free? → set controller, new SequenceTracker
-     → {claimed, controlSessionId}
-browser → {input, seq, ts, event}  (repeatedly)
-Hub: owns+controls? seq ok? not stale? → device {input, seq, event}
+Hub: owner? ESP online? free? → control session + auto video_subscribe
+     → {claimed}; agent ← {stream_start, sessionId}
+browser ↔ agent  (webrtc_* via hub, same deviceId + sessionId)
+browser → {calibrate_pointer} → ESP relative home moves
+browser → {tap_normalized, x, y} → chunked moves + click on ESP
 ```
 
-### Browser disconnects (fail-safe)
+### Independence
 ```
-socket close → Hub.removeBrowser
-Hub: was controlling? → device {release_all}; clear claim
+ESP disconnect  → controllerOnline=false; video can keep streaming
+Agent disconnect → videoAgentOnline=false; HID claim can keep working
 ```
-
-### Device disconnects
-```
-socket close → Hub.removeDevice(id, transport)   // transport guard vs. reconnects
-Hub: mark offline; controlling browser → {device_status offline} + {released}
-     → owner's browsers: {devices} snapshot (device now offline)
-```
-
-### Heartbeat / timeout
-The server pings every `HEARTBEAT_INTERVAL_MS`; if a socket hasn't ponged within
-`HEARTBEAT_TIMEOUT_MS` it is `terminate()`d, which triggers the normal close
-handling above. This catches half-open TCP connections (e.g. device loses power)
-that never send a FIN.
 
 ## Credential model
 
-Intentionally minimal and swappable behind two interfaces so it can be replaced
-by full account authentication later without touching the relay core:
+Intentionally minimal and swappable behind two interfaces:
 
 | Concern            | Interface                       | MVP implementation                     | Replace with                          |
 | ------------------ | ------------------------------- | -------------------------------------- | ------------------------------------- |
@@ -144,25 +155,19 @@ by full account authentication later without touching the relay core:
 | Browser sessions   | `SessionManager`                | HMAC-signed token + in-memory table    | JWT / server-side session store       |
 | Device identity    | `DeviceCredentialStore`         | `InMemoryDeviceStore` (JSON seed file) | DB-backed provisioning + rotation     |
 
-Session tokens are `base64url(payload).base64url(HMAC-SHA256(payload))` where
-`payload = { sid, uid, exp }`, signed with `SERVER_SECRET`. The server also keeps
-an in-memory session table so sessions can be revoked and aren't trusted on
-signature alone.
+The Windows agent reuses the device secret (`x-agent-secret`); no separate
+agent credential store in the MVP.
 
-Device credentials are long-lived per-device secrets compared in constant time.
-"Registration" in the MVP = presence in `devices.json`.
+## Deliberate non-goals
 
-## Deliberate non-goals (MVP)
-
-- **Video streaming** — out of scope for now.
-- **Horizontal scale** — state is in-process. A device and its controlling
-  browser must land on the same server instance. For multi-instance, add a
-  shared bus (e.g. Redis pub/sub) keyed by device id and a shared session store.
+- **Merging CONTROL and VIDEO** — permanently out of scope; paths stay independent.
+- **Horizontal scale** — state is in-process. Multi-instance needs a shared bus
+  keyed by device id.
 - **Persistent history** — device/session state is in-memory only.
 
 ## Scaling note
 
 Because routing is by in-memory maps, the MVP is single-instance. The Hub's
 transport abstraction makes the natural next step clear: replace direct
-`transport.send` to a remote device with a publish to a message bus that the
-owning instance consumes. No policy logic needs to change.
+`transport.send` with a publish to a message bus that the owning instance
+consumes. No policy logic needs to change.

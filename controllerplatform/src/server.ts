@@ -10,7 +10,7 @@ import { SessionManager } from "./auth.js";
 import { Hub } from "./hub.js";
 import type { UserStore } from "./stores/userStore.js";
 import type { DeviceCredentialStore, DeviceRecord } from "./stores/deviceStore.js";
-import type { BrowserToServer, DeviceToServer, Transport } from "./types.js";
+import type { AgentToServer, BrowserToServer, DeviceToServer, Transport } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +33,57 @@ function transportFor(socket: WebSocket): Transport {
 function firstHeader(req: IncomingMessage, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Normalize agent wire types. The Windows agent historically used PascalCase
+ * (`WebrtcOffer`); the relay canonical form is snake_case (`webrtc_offer`).
+ */
+export function normalizeAgentMessage(raw: Record<string, unknown>): AgentToServer | null {
+  const t = raw.type;
+  if (typeof t !== "string") return null;
+
+  const typeMap: Record<string, AgentToServer["type"]> = {
+    register: "register",
+    AgentRegister: "register",
+    heartbeat: "heartbeat",
+    Heartbeat: "heartbeat",
+    webrtc_offer: "webrtc_offer",
+    WebrtcOffer: "webrtc_offer",
+    webrtc_answer: "webrtc_answer",
+    WebrtcAnswer: "webrtc_answer",
+    ice_candidate: "ice_candidate",
+    IceCandidate: "ice_candidate",
+    video_metadata: "video_metadata",
+    VideoMetadata: "video_metadata",
+    source_lost: "source_lost",
+    SourceLost: "source_lost",
+    stream_state: "stream_state",
+    StreamState: "stream_state",
+    error: "error",
+    Error: "error",
+  };
+
+  const type = typeMap[t];
+  if (!type) return null;
+
+  const base = { ...raw, type } as Record<string, unknown>;
+
+  // PascalCase agent payloads sometimes nest differently; flatten common fields.
+  if (typeof base.sdpMid === "undefined" && typeof base.SdpMid === "string") {
+    base.sdpMid = base.SdpMid;
+  }
+  if (typeof base.sdpMLineIndex === "undefined" && typeof base.SdpMLineIndex === "number") {
+    base.sdpMLineIndex = base.SdpMLineIndex;
+  }
+  if (typeof base.candidate === "undefined" && typeof base.Candidate === "string") {
+    base.candidate = base.Candidate;
+  }
+  if (typeof base.sdp === "undefined" && typeof base.Sdp === "string") {
+    base.sdp = base.Sdp;
+  }
+
+  return base as unknown as AgentToServer;
 }
 
 export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstance> {
@@ -79,13 +130,11 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
 
   // --- WebSocket layer -----------------------------------------------------
   // We attach `ws` directly to Fastify's HTTP server in noServer mode and route
-  // the upgrade ourselves so device auth can use request headers.
+  // the upgrade ourselves so device/agent auth can use request headers.
   const browserWss = new WebSocketServer({ noServer: true });
   const deviceWss = new WebSocketServer({ noServer: true });
+  const agentWss = new WebSocketServer({ noServer: true });
 
-  // Fastify's underlying http server exists at construction; attach the
-  // upgrade handler directly. We route the upgrade ourselves so device auth
-  // can read request headers.
   app.server.on("upgrade", (req, socket, head) => {
     let pathname: string;
     let query: URLSearchParams;
@@ -128,14 +177,31 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
       return;
     }
 
+    if (pathname === "/ws/agent") {
+      const deviceId = firstHeader(req, "x-device-id") ?? query.get("deviceId") ?? "";
+      const secret = firstHeader(req, "x-agent-secret") ?? query.get("secret") ?? "";
+      const agentId = firstHeader(req, "x-agent-id") ?? query.get("agentId") ?? "";
+      const record = deviceStore.verifyDevice(deviceId, secret);
+      if (!record || !agentId) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        app.log.warn(
+          { path: pathname, deviceId, agentId: agentId || undefined },
+          "agent ws rejected: bad credentials",
+        );
+        return;
+      }
+      agentWss.handleUpgrade(req, socket, head, (ws) => {
+        agentWss.emit("connection", ws, req, { record, agentId });
+      });
+      return;
+    }
+
     socket.destroy();
   });
 
   // --- Browser connections -------------------------------------------------
   browserWss.on("connection", (socket: WebSocket, _req: IncomingMessage, session: { id: string; userId: string }) => {
-    // Each socket is an independent control client, even if two tabs share the
-    // same auth session/token. The auth session only authorizes; the clientId
-    // scopes claims and routing.
     const clientId = randomUUID();
     const transport = transportFor(socket);
     hub.addBrowser(clientId, session.userId, transport);
@@ -170,6 +236,31 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     socket.on("error", () => hub.removeDevice(record.id, transport));
   });
 
+  // --- Video agent connections ---------------------------------------------
+  agentWss.on(
+    "connection",
+    (
+      socket: WebSocket,
+      _req: IncomingMessage,
+      meta: { record: DeviceRecord; agentId: string },
+    ) => {
+      const transport = transportFor(socket);
+      hub.addVideoAgent(meta.record.id, meta.agentId, transport);
+      attachHeartbeat(socket);
+
+      socket.on("message", (raw) => {
+        const parsed = parse<Record<string, unknown>>(raw.toString());
+        if (!parsed) return;
+        const msg = normalizeAgentMessage(parsed);
+        if (!msg) return;
+        hub.handleAgentMessage(meta.record.id, transport, msg);
+      });
+
+      socket.on("close", () => hub.removeVideoAgent(meta.record.id, transport));
+      socket.on("error", () => hub.removeVideoAgent(meta.record.id, transport));
+    },
+  );
+
   // --- Heartbeat sweep -----------------------------------------------------
   // ws-level ping/pong. If a socket misses the timeout window it is terminated,
   // which triggers 'close' and the relevant Hub cleanup (offline / release_all).
@@ -181,7 +272,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
 
   const sweep = setInterval(() => {
     const now = Date.now();
-    for (const wss of [browserWss, deviceWss]) {
+    for (const wss of [browserWss, deviceWss, agentWss]) {
       for (const socket of wss.clients) {
         const last = liveness.get(socket) ?? now;
         if (now - last > config.heartbeatTimeoutMs) {
@@ -199,6 +290,7 @@ export async function buildServer(deps: BuildServerDeps): Promise<FastifyInstanc
     clearInterval(sweep);
     browserWss.close();
     deviceWss.close();
+    agentWss.close();
   });
 
   return app;

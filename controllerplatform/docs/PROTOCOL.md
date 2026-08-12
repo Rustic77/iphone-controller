@@ -4,13 +4,16 @@ Transport: **WebSocket**. Every frame is a single JSON object with a `type`
 field (a discriminated union). Definitions live in
 [`src/types.ts`](../src/types.ts) — that file is the source of truth.
 
-There are two independent socket populations:
+There are **three** independent socket populations:
 
 - **Browser** operator sockets on `/ws/browser`
-- **Device** (ESP32) sockets on `/ws/device`
+- **Device** (ESP32) sockets on `/ws/device` — **CONTROL** path
+- **Agent** (Windows video) sockets on `/ws/agent` — **VIDEO** path
 
-The server never trusts a socket to name itself; identity is established at
-authentication (below), not from message fields.
+**CONTROL and VIDEO are independent.** An ESP offline does not imply the video
+agent is offline, and vice versa. The server never trusts a socket to name
+itself; identity is established at authentication (below), not from message
+fields.
 
 ---
 
@@ -44,7 +47,7 @@ GET /ws/browser?token=<token>
 
 The `token` is the value from `/api/login`. Invalid/expired/revoked ⇒ `401`.
 
-### Device socket
+### Device socket (CONTROL)
 
 ```
 GET /ws/device
@@ -55,11 +58,24 @@ x-device-secret: <secret>
 (For browser-based testing, `?deviceId=…&secret=…` query params are also
 accepted.) Unknown id or wrong secret ⇒ `401`.
 
+### Agent socket (VIDEO)
+
+```
+GET /ws/agent
+x-device-id:     <deviceId>
+x-agent-id:      <agentId>
+x-agent-secret:  <device secret>
+```
+
+The agent authenticates with the **same per-device secret** as the ESP
+(`deviceStore.verifyDevice`). The `x-agent-id` identifies the Windows agent
+instance. Failed auth ⇒ `401`.
+
 ---
 
 ## 2. Input events
 
-The atomic unit of control. Produced by the operator UI, relayed verbatim to the
+The atomic unit of control. Produced by the operator UI, relayed to the
 device inside an `input` message.
 
 ```ts
@@ -82,57 +98,75 @@ A **drag** is expressed as `click(pressed:true)` → one or more `move` → `cli
 
 ```ts
 type BrowserToServer =
-  | { type: "claim";  deviceId: string }                    // request control
-  | { type: "release" }                                     // give up control
-  | { type: "release_all" }                                 // emergency stop (keeps claim)
+  | { type: "claim";  deviceId: string }
+  | { type: "release" }
+  | { type: "release_all" }
   | { type: "input";  seq: number; ts: number; event: InputEvent }
+  | { type: "tap_normalized"; seq: number; ts: number; x: number; y: number }
+  | { type: "calibrate_pointer" }
+  | { type: "video_subscribe"; deviceId: string }
+  | { type: "webrtc_offer"; deviceId: string; sessionId: string; sdp: string }
+  | { type: "webrtc_answer"; deviceId: string; sessionId: string; sdp: string }
+  | { type: "ice_candidate"; deviceId: string; sessionId: string; candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null }
   | { type: "ping";   ts?: number };
 ```
 
-**`input` rules:**
+**`input` / `tap_normalized` rules:**
 
-- `seq` — integer, **strictly increasing** within a control session (i.e. since
-  the last successful `claim`). The server drops `seq <= lastAccepted`
-  (duplicate / out-of-order).
-- `ts` — client epoch milliseconds. The server drops commands where
-  `now - ts > STALE_COMMAND_MS` (default 2000 ms).
-- Dropped commands are silently discarded (logged at `debug`); they are not
-  acknowledged or errored.
-- Sending `input` without controlling the target device ⇒ `{ error, reason: "not_controlling" }`.
+- `seq` — integer, **strictly increasing** within a control session. Used for
+  browser→server dedup/staleness only. The hub assigns a separate monotonic
+  outbound seq to the ESP for each HID event (including synthetic calibrate/tap
+  batches).
+- `ts` — client epoch milliseconds. Dropped when `now - ts > STALE_COMMAND_MS`.
+- `tap_normalized` requires pointer calibration state `READY` and an active
+  control claim. Coords are `0..1` in the phone's current orientation.
+
+**`calibrate_pointer`:** homes the HID cursor with many `move(-40,-40)`, then
+marks calibration `READY` at estimated `(0,0)`.
+
+**WebRTC:** only relayed for the **same `deviceId`** between an owner browser
+that has claimed or `video_subscribe`d and that device's video agent. Wrong
+device or stale `sessionId` ⇒ `{ error, reason: "stale_session" | "not_subscribed" | … }`.
+
+A successful `claim` also auto-subscribes video for that device.
 
 ---
 
 ## 4. Server → Browser
 
 ```ts
-type ServerToBrowser =
-  | { type: "welcome"; sessionId: string; userId: string }
-  | { type: "devices"; devices: DeviceSummary[] }          // full snapshot, pushed on change
-  | { type: "claimed"; deviceId: string; controlSessionId: string }
-  | { type: "claim_failed"; deviceId: string; reason: string } // "not_found" | "offline" | "busy"
-  | { type: "released"; deviceId: string }
-  | { type: "device_status"; deviceId: string; online: boolean }
-  | { type: "error"; reason: string }
-  | { type: "pong"; ts?: number };
-
 interface DeviceSummary {
   id: string;
   name: string;
-  online: boolean;
-  lastSeen: number | null;   // epoch ms
+  online: boolean;              // back-compat alias of controllerOnline
+  deviceOnline: boolean;        // alias of controllerOnline
+  controllerOnline: boolean;    // ESP connected
+  videoAgentOnline: boolean;
+  videoStreaming: boolean;
+  hidReady: boolean;            // MVP: == controllerOnline
+  webRtcConnected: boolean;
+  lastSeen: number | null;
   controlledByYou: boolean;
-  busy: boolean;             // controlled by another session
+  busy: boolean;
 }
-```
 
-- On connect the browser receives `welcome` then a `devices` snapshot.
-- `devices` is re-pushed whenever the owner's fleet changes (device on/offline,
-  claim/release). The UI can treat it as authoritative and re-render.
-- `claim_failed.reason`:
-  - `not_found` — device doesn't exist **or the operator doesn't own it**
-    (existence intentionally not distinguished).
-  - `offline` — device is not currently connected.
-  - `busy` — another session already controls it.
+type ServerToBrowser =
+  | { type: "welcome"; sessionId: string; userId: string }
+  | { type: "devices"; devices: DeviceSummary[] }
+  | { type: "claimed"; deviceId: string; controlSessionId: string }
+  | { type: "claim_failed"; deviceId: string; reason: string }
+  | { type: "released"; deviceId: string }
+  | { type: "device_status"; deviceId: string; online: boolean }
+  | { type: "video_status"; deviceId: string; videoAgentOnline: boolean; videoStreaming: boolean; webRtcConnected: boolean; sessionId?: string }
+  | { type: "webrtc_offer" | "webrtc_answer"; deviceId: string; sessionId: string; sdp: string }
+  | { type: "ice_candidate"; deviceId: string; sessionId: string; candidate: string; … }
+  | { type: "video_metadata"; deviceId: string; width: number; height: number; orientation?: string; fps?: number }
+  | { type: "source_lost"; deviceId: string; reason?: string }
+  | { type: "stream_state"; deviceId: string; state: string; detail?: string }
+  | { type: "calibration_state"; state: string }  // UNCALIBRATED|CALIBRATING|READY|INVALID
+  | { type: "error"; reason: string }
+  | { type: "pong"; ts?: number };
+```
 
 ---
 
@@ -140,34 +174,13 @@ interface DeviceSummary {
 
 ```ts
 type ServerToDevice =
-  | { type: "hello"; deviceId: string }         // sent right after auth
-  | { type: "input"; session: string; seq: number; event: InputEvent } // relayed, post-validation
-  | { type: "release_all" }                     // drop all HID state NOW
+  | { type: "hello"; deviceId: string }
+  | { type: "input"; session: string; seq: number; event: InputEvent }
+  | { type: "release_all" }
   | { type: "ping"; ts?: number };
 ```
 
-The device receives `input` **only** after the server has validated ownership,
-control, sequence, and staleness — the firmware can apply events directly.
-
-`session` is the control-session id (a new one is minted on every successful
-`claim`). It lets the device enforce its own session/sequence discipline:
-
-- `seq` is strictly increasing **within a `session`**; the device drops
-  `seq <= last` (duplicate / out-of-order).
-- The device latches the first `session` it sees and **rejects** input from any
-  other session until reset.
-- The server guarantees a `release_all` is sent to the device **before** any
-  change of `session` (on release, device switch, browser disconnect, or a
-  re-claim), so the device resets its sequence space and adopts the new session
-  cleanly. This is also why a cloud reconnect never replays old input: a fresh
-  connection starts with no latched session and `seq` begins again.
-
-The firmware **must** handle `release_all` by releasing every held mouse button
-and keyboard key. The server sends it on:
-
-- emergency stop (operator pressed RELEASE ALL),
-- explicit `release`,
-- controlling browser disconnect.
+Unchanged from the control-only MVP. Firmware is not modified for video.
 
 ---
 
@@ -175,60 +188,90 @@ and keyboard key. The server sends it on:
 
 ```ts
 type DeviceToServer =
-  | { type: "status"; note?: string }   // optional device-reported status
+  | { type: "status"; note?: string }
   | { type: "pong"; ts?: number };
 ```
 
-Any message from the device refreshes its `lastSeen`. Devices are sinks; they do
-not route anything to browsers in the MVP beyond liveness.
+---
+
+## 7. Agent ↔ Server (VIDEO)
+
+Canonical types are **snake_case**. The server also accepts PascalCase aliases
+from the Windows agent (`WebrtcOffer` → `webrtc_offer`, etc.).
+
+```ts
+type AgentToServer =
+  | { type: "register"; agentId?: string; capabilities?: string[] }
+  | { type: "heartbeat"; ts?: number }
+  | { type: "webrtc_offer" | "webrtc_answer"; sessionId: string; sdp: string; deviceId?: string }
+  | { type: "ice_candidate"; sessionId: string; candidate: string; … }
+  | { type: "video_metadata"; width: number; height: number; orientation?: string; fps?: number }
+  | { type: "source_lost"; reason?: string }
+  | { type: "stream_state"; state: string; detail?: string }
+  | { type: "error"; code?: string; message?: string };
+
+type ServerToAgent =
+  | { type: "registered"; deviceId: string; agentId: string }
+  | { type: "heartbeat_ack"; ts?: number }
+  | { type: "stream_start"; sessionId: string; deviceId: string }
+  | { type: "stream_stop"; sessionId?: string; deviceId?: string }
+  | { type: "webrtc_offer" | "webrtc_answer"; deviceId: string; sessionId: string; sdp: string }
+  | { type: "ice_candidate"; deviceId: string; sessionId: string; candidate: string; … }
+  | { type: "error"; reason: string };
+```
+
+On `video_subscribe` (or claim auto-subscribe) the hub mints a `sessionId`,
+sends `stream_start` to the agent, and returns it on `video_status` to the
+browser. WebRTC messages with a mismatched session are rejected as
+`stale_session`. Signaling is never cross-routed to another device's agent.
+
+Orientation changes in `video_metadata` invalidate pointer calibration
+(`INVALID`) for browsers controlling that device.
 
 ---
 
-## 7. Heartbeat & liveness
+## 8. Heartbeat & liveness
 
-Liveness uses **WebSocket-level ping/pong** frames (not the app-level `ping`
-messages above, which are a convenience echo):
+Liveness uses **WebSocket-level ping/pong** frames for browser, device, and
+agent sockets:
 
 - Server pings every `HEARTBEAT_INTERVAL_MS` (default 10 s).
 - If a socket does not pong within `HEARTBEAT_TIMEOUT_MS` (default 30 s) it is
-  terminated, which runs the normal disconnect handling (device → offline +
-  notify; browser → `release_all` to its device).
-
-Clients/firmware only need to answer WS pings (the `ws` library and browsers do
-this automatically) to stay alive.
+  terminated, which runs the normal disconnect handling.
 
 ---
 
-## 8. Error handling
+## 9. Audit log (info, no secrets)
 
-- Malformed JSON from a browser ⇒ `{ error, reason: "bad_json" }`.
-- Unknown `type` from a browser ⇒ `{ error, reason: "unknown_message_type" }`.
-- Malformed JSON from a device is ignored.
-- The server never throws on bad input; unparseable/invalid messages are dropped.
+The hub emits structured info logs (no secrets, no text contents) for:
+
+- control session begin / end
+- video session start / end
+- controller connect / disconnect
+- video agent connect / disconnect
 
 ---
 
-## 9. Example session
+## 10. Example session (control + video)
 
 ```
-# operator
-POST /api/login {admin, ****}            → { token }
-
-# device (ESP32)
+# ESP
 WS  /ws/device  (x-device-id, x-device-secret)
       ← { "type":"hello", "deviceId":"esp32-lab-01" }
 
+# Windows agent
+WS  /ws/agent   (x-device-id, x-agent-id, x-agent-secret)
+      ← { "type":"registered", "deviceId":"esp32-lab-01", "agentId":"windows-agent-01" }
+
 # browser
 WS  /ws/browser?token=...
-      ← { "type":"welcome", "sessionId":"…", "userId":"dev-operator" }
-      ← { "type":"devices", "devices":[{ "id":"esp32-lab-01","online":true,… }] }
    → { "type":"claim", "deviceId":"esp32-lab-01" }
-      ← { "type":"claimed", "deviceId":"esp32-lab-01", "controlSessionId":"…" }
-   → { "type":"input", "seq":1, "ts":1786490000000, "event":{"kind":"move","dx":12,"dy":-3} }
-        device ← { "type":"input", "seq":1, "event":{"kind":"move","dx":12,"dy":-3} }
-   → { "type":"input", "seq":1, … }        # duplicate seq → dropped, not forwarded
-   → { "type":"release_all" }              # emergency
-        device ← { "type":"release_all" }
-   (browser socket closes)
-        device ← { "type":"release_all" }  # fail-safe on disconnect
+      ← { "type":"claimed", … }
+      ← { "type":"video_status", …, "sessionId":"…" }
+        agent ← { "type":"stream_start", "sessionId":"…", "deviceId":"…" }
+   → { "type":"calibrate_pointer" }
+        device ← many { "type":"input", event:{kind:"move",dx:-40,dy:-40} }
+      ← { "type":"calibration_state", "state":"READY" }
+   → { "type":"webrtc_offer", deviceId, sessionId, sdp }
+        agent ← { "type":"webrtc_offer", … }
 ```

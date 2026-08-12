@@ -6,14 +6,15 @@ an authenticated operator control that ESP32 from a browser, anywhere, without
 exposing the ESP32 to the public Internet.
 
 ```
-Browser ──HTTPS/WSS──▶ Cloud control server ◀──outbound WSS/TLS── ESP32 ──USB HID──▶ iPhone
+Browser ──HTTPS/WSS──▶ Cloud control server ◀──outbound WSS── ESP32 ──USB HID──▶ iPhone
+                              ▲
+                              └──outbound WS/WSS── Windows video agent (AirPlay → WebRTC)
 ```
 
-**The ESP32 always dials out.** The server never connects to the device, so no
-port forwarding and no public exposure of the ESP32 is required.
+**The ESP32 and Windows agent always dial out.** CONTROL (ESP HID) and VIDEO
+(WebRTC) are independent paths — either can be up while the other is down.
 
-> Scope: this is the control-plane MVP. Video streaming is intentionally **not**
-> included. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+> See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 > [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full design and wire protocol.
 
 ## Features
@@ -30,8 +31,10 @@ port forwarding and no public exposure of the ESP32 is required.
 - On device disconnect → the controlling browser sees **offline immediately**.
 - ws-level **heartbeat / timeout** handling.
 - Structured JSON logs (pino via Fastify).
-- Minimal web UI: device list + controller page (trackpad, click, drag, scroll,
-  keyboard text entry, emergency RELEASE ALL).
+- Minimal web UI: device list + controller page (live video, trackpad, click,
+  drag, scroll, keyboard text entry, pointer calibration, emergency RELEASE ALL).
+- Windows **video agent** on `/ws/agent` with WebRTC signaling relay and
+  calibrated `tap_normalized` video taps.
 
 ## Tech stack
 

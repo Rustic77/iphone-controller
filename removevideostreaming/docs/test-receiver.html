@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RemotePhone test receiver</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 960px; }
+    video { width: 100%; max-height: 70vh; background: #111; }
+    label { display: block; margin-top: 0.75rem; }
+    input { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+    .row { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
+    button { padding: 0.5rem 1rem; }
+    #log { white-space: pre-wrap; background: #f4f4f4; padding: 0.75rem; height: 12rem; overflow: auto; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>RemotePhone test receiver</h1>
+  <p>
+    Minimal browser page for Phase 2: WebSocket signaling + <code>RTCPeerConnection</code> video.
+    Default endpoint (see README): <code>ws://localhost:8080/ws/browser-video</code>.
+  </p>
+
+  <label>Signaling URL
+    <input id="wsUrl" value="ws://localhost:8080/ws/browser-video" />
+  </label>
+  <label>Device ID
+    <input id="deviceId" value="device-1" />
+  </label>
+  <label>Session ID
+    <input id="sessionId" value="session-1" />
+  </label>
+
+  <div class="row">
+    <button id="btnConnect" type="button">Connect</button>
+    <button id="btnDisconnect" type="button" disabled>Disconnect</button>
+  </div>
+
+  <p id="status">Disconnected</p>
+  <video id="remoteVideo" autoplay playsinline controls></video>
+  <h2>Log</h2>
+  <div id="log"></div>
+
+  <script>
+    // Vanilla JS smoke client. Wire offer/answer/ICE to your Phase 2 server contract.
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    const videoEl = document.getElementById("remoteVideo");
+    const btnConnect = document.getElementById("btnConnect");
+    const btnDisconnect = document.getElementById("btnDisconnect");
+
+    let ws = null;
+    let pc = null;
+
+    function log(msg) {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      logEl.textContent += line + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(line);
+    }
+
+    function setConnected(connected) {
+      btnConnect.disabled = connected;
+      btnDisconnect.disabled = !connected;
+      statusEl.textContent = connected ? "Connected" : "Disconnected";
+    }
+
+    function send(obj) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify(obj));
+    }
+
+    async function ensurePeer() {
+      if (pc) return pc;
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return;
+        send({
+          type: "IceCandidate",
+          deviceId: document.getElementById("deviceId").value,
+          sessionId: document.getElementById("sessionId").value,
+          candidate: ev.candidate.candidate,
+          sdpMid: ev.candidate.sdpMid,
+          sdpMLineIndex: ev.candidate.sdpMLineIndex,
+        });
+      };
+
+      pc.ontrack = (ev) => {
+        log("ontrack: " + ev.track.kind);
+        videoEl.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      };
+
+      pc.onconnectionstatechange = () => log("pc.state=" + pc.connectionState);
+      return pc;
+    }
+
+    async function handleMessage(data) {
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        log("non-JSON: " + data);
+        return;
+      }
+
+      log("← " + msg.type);
+      const peer = await ensurePeer();
+      const sessionId = document.getElementById("sessionId").value;
+
+      if (msg.sessionId && msg.sessionId !== sessionId) {
+        log("ignored stale sessionId=" + msg.sessionId);
+        return;
+      }
+
+      if (msg.type === "WebrtcOffer" && msg.sdp) {
+        await peer.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        send({
+          type: "WebrtcAnswer",
+          deviceId: document.getElementById("deviceId").value,
+          sessionId,
+          sdp: answer.sdp,
+        });
+      } else if (msg.type === "WebrtcAnswer" && msg.sdp) {
+        await peer.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+      } else if (msg.type === "IceCandidate" && msg.candidate) {
+        try {
+          await peer.addIceCandidate({
+            candidate: msg.candidate,
+            sdpMid: msg.sdpMid ?? undefined,
+            sdpMLineIndex: msg.sdpMLineIndex ?? undefined,
+          });
+        } catch (err) {
+          log("addIceCandidate error: " + err);
+        }
+      } else if (msg.type === "Heartbeat") {
+        send({
+          type: "HeartbeatAck",
+          deviceId: document.getElementById("deviceId").value,
+          sessionId,
+          timestampUtc: new Date().toISOString(),
+        });
+      } else if (msg.type === "Error") {
+        log("server error: " + (msg.message || msg.code));
+      }
+    }
+
+    btnConnect.onclick = () => {
+      const url = document.getElementById("wsUrl").value.trim();
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        setConnected(true);
+        log("ws open " + url);
+        send({
+          type: "StreamStart",
+          deviceId: document.getElementById("deviceId").value,
+          sessionId: document.getElementById("sessionId").value,
+          preferredFps: 30,
+        });
+      };
+      ws.onmessage = (ev) => handleMessage(ev.data);
+      ws.onclose = () => {
+        setConnected(false);
+        log("ws closed");
+      };
+      ws.onerror = () => log("ws error");
+    };
+
+    btnDisconnect.onclick = () => {
+      try {
+        send({
+          type: "StreamStop",
+          deviceId: document.getElementById("deviceId").value,
+          sessionId: document.getElementById("sessionId").value,
+        });
+      } catch { /* ignore */ }
+      if (ws) ws.close();
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      videoEl.srcObject = null;
+      setConnected(false);
+    };
+  </script>
+</body>
+</html>

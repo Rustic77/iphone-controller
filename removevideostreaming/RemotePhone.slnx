@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RemotePhone.Agent.Core/RemotePhone.Agent.Core.csproj" />
+    <Project Path="src/RemotePhone.Agent/RemotePhone.Agent.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RemotePhone.Agent.Tests/RemotePhone.Agent.Tests.csproj" />
+  </Folder>
+</Solution>
