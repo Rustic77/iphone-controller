@@ -6,6 +6,7 @@
  * Outbound cloud control client -- see cloud_client.h for the contract.
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -284,6 +285,17 @@ static void cmd_enqueue(const cc_cmd_t *cmd)
     }
 }
 
+/* Drop every pending cloud command so a disconnect / session change never
+ * replays old input (req 13). Pair with input_release_all / session_reset. */
+static void cmd_queue_flush(void)
+{
+    if (!s_cmd_queue) {
+        return;
+    }
+    xQueueReset(s_cmd_queue);
+    hid_controller_cancel_pending();
+}
+
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -417,11 +429,11 @@ static void handle_input(const char *msg)
 {
     char session[CLOUD_SESSION_MAX + 1];
     int seq;
-    if (!j_get_string(msg, "session", session, sizeof(session))) {
+    if (!j_get_string(msg, "session", session, sizeof(session)) || session[0] == '\0') {
         return; /* invalid */
     }
-    if (!j_get_int(msg, "seq", &seq)) {
-        return; /* invalid */
+    if (!j_get_int(msg, "seq", &seq) || seq <= 0) {
+        return; /* invalid / non-positive seq */
     }
 
     /* Session gate (req 11): adopt the first session seen after a reset; reject
@@ -436,8 +448,11 @@ static void handle_input(const char *msg)
         return;
     }
 
-    /* Sequence gate (req 10/11): strictly increasing; drop duplicate/stale. */
+    /* Sequence gate (req 10/11): strictly increasing; drop duplicate / stale.
+     * Wall-clock stale filtering is done by the relay before forward; the
+     * device enforces ordering so a reconnect/session change cannot replay. */
     if ((uint32_t)seq <= s_last_seq) {
+        ESP_LOGD(TAG, "drop: duplicate/stale seq=%d last=%u", seq, (unsigned)s_last_seq);
         return;
     }
     s_last_seq = (uint32_t)seq;
@@ -467,7 +482,9 @@ static void handle_frame(const char *data, int len)
     if (strcmp(type, "input") == 0) {
         handle_input(buf);
     } else if (strcmp(type, "release_all") == 0) {
-        /* Authoritative release + session handover boundary (req 12/13). */
+        /* Authoritative release + session handover boundary (req 12/13).
+         * Flush first so pending moves/clicks cannot run after the release. */
+        cmd_queue_flush();
         cc_cmd_t cmd = { .kind = CC_RELEASE_ALL };
         cmd_enqueue(&cmd);
         session_reset();
@@ -496,6 +513,8 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     case WEBSOCKET_EVENT_CONNECTED:
         /* Auth is via the handshake headers, so a connect == authenticated. */
         ESP_LOGI(TAG, "cloud connected");
+        /* Req 13: never replay anything left from a previous link. */
+        cmd_queue_flush();
         session_reset();
         status_set_connected(true);
         status_mark_message();
@@ -520,8 +539,9 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGW(TAG, "cloud link down (event %d)", (int)event_id);
         status_set_connected(false);
+        /* Req 12 + 13: drop held HID state and discard any still-queued input. */
+        cmd_queue_flush();
         session_reset();
-        /* Req 12: the operator is gone -- drop every held button/key NOW. */
         input_release_all();
         xEventGroupSetBits(s_events, BIT_DISCONNECT);
         break;

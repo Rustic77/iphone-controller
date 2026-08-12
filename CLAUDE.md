@@ -322,16 +322,24 @@ TypeScript/Node app); its `docs/PROTOCOL.md` is the authoritative wire spec.
 - **Authenticate on connect** — auth is the handshake headers; a successful
   connect == authenticated. The server's `hello` confirms it.
 - **Heartbeat** — ws-level ping/pong (`ping_interval_sec`, `pingpong_timeout_sec`);
-  any received frame refreshes `last_cloud_message_ms`.
+  any received frame refreshes `last_cloud_message_ms`. App-level `ping` frames
+  get an immediate `{"type":"pong"}` reply.
 - **Reconnect** — auto-reconnect is disabled; a supervisor task reconnects with
   **exponential backoff** (1 s → 30 s, +jitter), reset on a healthy connect.
 - **Session / sequence** — the relay stamps each `input` with a control-`session`
   and a monotonic `seq`. The client latches the first session, **rejects** other
-  sessions, and **drops** `seq <= last` (duplicate / stale). A server `release_all`
-  precedes every session change and resets this state, so a **reconnect never
-  replays** old input (a fresh connection starts with no latched session).
+  sessions, and **drops** `seq <= last` (duplicate / stale) plus non-positive /
+  missing `seq`/`session`/malformed frames. Wall-clock stale filtering
+  (`STALE_COMMAND_MS`) is enforced by the relay before forward.
+- **No replay across reconnect / session change** — on connect, disconnect, and
+  server `release_all`, the client flushes its command queue
+  (`xQueueReset` + `hid_controller_cancel_pending`), resets session/seq, and
+  enqueues / calls `input_release_all()`. A fresh link starts with no latched
+  session, so old input cannot run.
 - **Fail-safe** — on any disconnect/close/error the client calls
   `input_release_all()` (drop all held buttons/keys), matching the LAN path.
+- **LAN coexistence** — the SoftAP/STA HTTP+WS control server keeps running;
+  cloud and LAN share `input_actions` / `hid_controller`.
 - **Non-blocking WS task** — the WS event task only validates + enqueues; a
   dedicated worker task drains the queue and calls `input_actions` (which may
   block for typing/taps), so a gesture never stalls frame reads or heartbeats.
@@ -340,6 +348,44 @@ TypeScript/Node app); its `docs/PROTOCOL.md` is the authoritative wire spec.
 
 `cloud_provisioned`, `cloud_connected`, `cloud_session`, `cloud_host`,
 `cloud_device_id`, `last_cloud_message_ms`. Never any secret.
+
+### Local cloud-relay test (before real Internet deploy)
+
+You do **not** need a public server to validate the whole chain. Run the sibling
+relay on your laptop, point the ESP32 at its LAN IP over `ws://`, then drive the
+phone from the relay UI. Only switch the URI to `wss://…` when deploying.
+
+1. **Start the relay** (from `../controllerplatform` or `./controllerplatform`):
+   ```bash
+   cp .env.example .env          # set SERVER_SECRET to a long random hex
+   cp devices.example.json devices.json
+   npm install
+   npm run dev                   # listens on 0.0.0.0:8080
+   ```
+   Note your laptop's LAN IP (e.g. `192.168.1.50`). Keep firewall open for 8080.
+
+2. **Provision the ESP32** (device already on the same LAN / SoftAP UI):
+   ```bash
+   curl -X POST http://<esp32-ip>/api/cloud/config \
+     -H "Content-Type: application/json" \
+     -d '{"uri":"ws://192.168.1.50:8080/ws/device","device_id":"esp32-lab-01","secret":"replace-with-a-long-random-per-device-secret"}'
+   ```
+   Device reboots. Confirm with `GET /api/status` → `cloud_provisioned:true`,
+   `cloud_connected:true`. UART should log `cloud connected` then
+   `authenticated; server hello…`. Secret is never logged.
+
+3. **Control via the relay UI** — open `http://192.168.1.50:8080`, login with
+   `DEV_USERNAME` / `DEV_PASSWORD` from `.env`, claim `esp32-lab-01`, use the
+   trackpad. Disconnect the browser tab and confirm held buttons release
+   (`release_all`). Kill the relay briefly and confirm the ESP32 reconnects with
+   backoff and does not replay old moves.
+
+4. **LAN still works** — `http://<esp32-ip>/` trackpad remains usable while
+   cloud is connected.
+
+5. **Production cutover** — deploy the relay behind HTTPS/WSS (Caddy/nginx/LB),
+   re-provision with `wss://relay.example.com/ws/device` (TLS verified via the
+   Mozilla CA bundle). Unprovision: `POST /api/cloud/reset`.
 
 ## iPhone HID objective
 
