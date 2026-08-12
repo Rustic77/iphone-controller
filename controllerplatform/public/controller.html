@@ -1,0 +1,198 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Control Relay — Controller</title>
+<link rel="stylesheet" href="/app.css" />
+
+<header>
+  <h1><a href="/" style="text-decoration:none;color:inherit">← Devices</a></h1>
+  <span class="status-pill"><span id="connDot" class="dot"></span><span id="connText">connecting…</span></span>
+</header>
+
+<main>
+  <div class="card">
+    <div class="row">
+      <strong id="deviceName">device</strong>
+      <div class="spacer"></div>
+      <button id="releaseAll" class="danger">■ RELEASE ALL</button>
+    </div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div id="pad" class="trackpad">Move here to control · click / drag / two-finger scroll</div>
+
+  <div class="controls">
+    <button id="leftClick">Left click</button>
+    <button id="rightClick">Right click</button>
+    <div class="spacer"></div>
+    <button id="scrollUp">Scroll ▲</button>
+    <button id="scrollDown">Scroll ▼</button>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <label class="muted" for="textIn">Keyboard text entry</label>
+    <div class="grid2" style="margin-top:8px">
+      <input id="textIn" placeholder="Type text, press Enter to send" />
+      <div class="row">
+        <button id="sendText" class="primary">Send text</button>
+        <button id="sendEnter">Enter ⏎</button>
+        <button id="sendBksp">⌫ Backspace</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:6px">Activity</div>
+    <div id="log" class="log"></div>
+  </div>
+</main>
+
+<script>
+  const TOKEN_KEY = "relay.token";
+  const $ = (id) => document.getElementById(id);
+  const deviceId = new URLSearchParams(location.search).get("device");
+  const token = localStorage.getItem(TOKEN_KEY);
+
+  if (!token) location.href = "/";
+  $("deviceName").textContent = deviceId || "unknown device";
+
+  let seq = 1;
+  let claimed = false;
+  let ws;
+
+  function log(line) {
+    const el = $("log");
+    el.textContent += line + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function setConn(state, text) {
+    $("connDot").classList.toggle("online", state === "on");
+    $("connText").textContent = text;
+  }
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  // All input goes through here: monotonically increasing seq + client ts.
+  function sendInput(event) {
+    if (!claimed) return;
+    send({ type: "input", seq: seq++, ts: Date.now(), event });
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws/browser?token=${encodeURIComponent(token)}`);
+
+    ws.onopen = () => {
+      setConn("connecting", "authenticating…");
+      send({ type: "claim", deviceId });
+    };
+    ws.onclose = () => {
+      claimed = false;
+      setConn("off", "disconnected");
+      $("pad").classList.remove("active");
+    };
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      switch (msg.type) {
+        case "claimed":
+          claimed = true;
+          setConn("on", "controlling " + deviceId);
+          log("claimed control (session " + msg.controlSessionId + ")");
+          break;
+        case "claim_failed":
+          setConn("off", "claim failed: " + msg.reason);
+          $("err").textContent = "Cannot control device: " + msg.reason;
+          break;
+        case "device_status":
+          if (!msg.online) {
+            claimed = false;
+            setConn("off", "device offline");
+            $("err").textContent = "Device went offline.";
+            $("pad").classList.remove("active");
+          }
+          break;
+        case "released":
+          claimed = false;
+          setConn("off", "released");
+          break;
+        case "error":
+          log("server error: " + msg.reason);
+          break;
+      }
+    };
+  }
+
+  /* ---- Trackpad: pointer movement, click, drag ---- */
+  const pad = $("pad");
+  let last = null;
+  let dragging = false;
+
+  pad.addEventListener("pointerdown", (e) => {
+    pad.setPointerCapture(e.pointerId);
+    last = { x: e.clientX, y: e.clientY };
+    pad.classList.add("active");
+  });
+
+  pad.addEventListener("pointermove", (e) => {
+    if (!last) return;
+    const dx = e.clientX - last.x;
+    const dy = e.clientY - last.y;
+    last = { x: e.clientX, y: e.clientY };
+    if (dx || dy) sendInput({ kind: "move", dx, dy });
+  });
+
+  pad.addEventListener("pointerup", (e) => {
+    // A tap without movement counts as a left click; a drag releases here.
+    if (dragging) {
+      sendInput({ kind: "click", button: "left", pressed: false });
+      dragging = false;
+    }
+    last = null;
+    pad.classList.remove("active");
+    pad.releasePointerCapture?.(e.pointerId);
+  });
+
+  pad.addEventListener("dblclick", () => {
+    // Double-click starts a drag: press-and-hold left button.
+    dragging = true;
+    sendInput({ kind: "click", button: "left", pressed: true });
+    log("drag started (double-click to grab, release pad to drop)");
+  });
+
+  pad.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    sendInput({ kind: "scroll", dx: Math.sign(e.deltaX), dy: -Math.sign(e.deltaY) });
+  }, { passive: false });
+
+  function click(button) {
+    sendInput({ kind: "click", button, pressed: true });
+    sendInput({ kind: "click", button, pressed: false });
+  }
+
+  /* ---- Buttons ---- */
+  $("leftClick").onclick = () => click("left");
+  $("rightClick").onclick = () => click("right");
+  $("scrollUp").onclick = () => sendInput({ kind: "scroll", dx: 0, dy: 3 });
+  $("scrollDown").onclick = () => sendInput({ kind: "scroll", dx: 0, dy: -3 });
+
+  $("sendText").onclick = () => {
+    const t = $("textIn").value;
+    if (t) sendInput({ kind: "text", text: t });
+    $("textIn").value = "";
+  };
+  $("textIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("sendText").click(); });
+  $("sendEnter").onclick = () => { sendInput({ kind: "key", code: "Enter", pressed: true }); sendInput({ kind: "key", code: "Enter", pressed: false }); };
+  $("sendBksp").onclick = () => { sendInput({ kind: "key", code: "Backspace", pressed: true }); sendInput({ kind: "key", code: "Backspace", pressed: false }); };
+
+  $("releaseAll").onclick = () => {
+    sendInput({ kind: "release_all" }); // best-effort local intent
+    send({ type: "release_all" });      // authoritative emergency stop
+    log("EMERGENCY: release all sent");
+  };
+
+  window.addEventListener("beforeunload", () => { if (ws) ws.close(); });
+
+  connect();
+</script>

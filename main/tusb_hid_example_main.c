@@ -12,14 +12,14 @@
 #include "tinyusb_default_config.h"
 #include "class/hid/hid_device.h"
 #include "driver/gpio.h"
+#include "hid_controller.h"
+#include "input_actions.h"
+#include "wifi_ap.h"
+#include "control_server.h"
+#include "cloud_client.h"
 
 #define APP_BUTTON (GPIO_NUM_0) // Use BOOT signal by default
 static const char *TAG = "example";
-
-/* Flag to indicate if the host has suspended the USB bus */
-static bool suspended = false;
-/* Flag of possibility to Wakeup Host via Remote Wakeup feature */
-static bool wakeup_host = false;
 
 /************* TinyUSB descriptors ****************/
 
@@ -91,92 +91,67 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 {
 }
 
-/********* Application ***************/
+/********* USB lifecycle ***************/
 
-typedef enum {
-    MOUSE_DIR_RIGHT,
-    MOUSE_DIR_DOWN,
-    MOUSE_DIR_LEFT,
-    MOUSE_DIR_UP,
-    MOUSE_DIR_MAX,
-} mouse_dir_t;
-
-#define DISTANCE_MAX        125
-#define DELTA_SCALAR        5
-
-static void mouse_draw_square_next_delta(int8_t *delta_x_ret, int8_t *delta_y_ret)
+// esp_tinyusb owns tud_mount_cb()/tud_umount_cb() and forwards them to this
+// event callback (registered via TINYUSB_DEFAULT_CONFIG below). Runs in the
+// TinyUSB task context. We forward the connection state to the HID controller
+// so it can release/clear HID state on disconnect and reconnect.
+static void usb_event_cb(tinyusb_event_t *event, void *arg)
 {
-    static mouse_dir_t cur_dir = MOUSE_DIR_RIGHT;
-    static uint32_t distance = 0;
-
-    // Calculate next delta
-    if (cur_dir == MOUSE_DIR_RIGHT) {
-        *delta_x_ret = DELTA_SCALAR;
-        *delta_y_ret = 0;
-    } else if (cur_dir == MOUSE_DIR_DOWN) {
-        *delta_x_ret = 0;
-        *delta_y_ret = DELTA_SCALAR;
-    } else if (cur_dir == MOUSE_DIR_LEFT) {
-        *delta_x_ret = -DELTA_SCALAR;
-        *delta_y_ret = 0;
-    } else if (cur_dir == MOUSE_DIR_UP) {
-        *delta_x_ret = 0;
-        *delta_y_ret = -DELTA_SCALAR;
-    }
-
-    // Update cumulative distance for current direction
-    distance += DELTA_SCALAR;
-    // Check if we need to change direction
-    if (distance >= DISTANCE_MAX) {
-        distance = 0;
-        cur_dir++;
-        if (cur_dir == MOUSE_DIR_MAX) {
-            cur_dir = 0;
-        }
-    }
-}
-
-static void app_send_hid_demo(void)
-{
-    // Keyboard output: Send key 'a/A' pressed and released
-    ESP_LOGI(TAG, "Sending Keyboard report");
-    uint8_t keycode[6] = {HID_KEY_A};
-    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, keycode);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
-
-    // Mouse output: Move mouse cursor in square trajectory
-    ESP_LOGI(TAG, "Sending Mouse report");
-    int8_t delta_x;
-    int8_t delta_y;
-    for (int i = 0; i < (DISTANCE_MAX / DELTA_SCALAR) * 4; i++) {
-        // Get the next x and y delta in the draw square pattern
-        mouse_draw_square_next_delta(&delta_x, &delta_y);
-        tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE, 0x00, delta_x, delta_y, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(20));
+    switch (event->id) {
+    case TINYUSB_EVENT_ATTACHED:
+        ESP_LOGI(TAG, "USB mounted");
+        hid_controller_usb_set_connected(true);
+        break;
+    case TINYUSB_EVENT_DETACHED:
+        ESP_LOGI(TAG, "USB unmounted");
+        hid_controller_usb_set_connected(false);
+        break;
+    default:
+        break;
     }
 }
 
 void tud_suspend_cb(bool remote_wakeup_en)
 {
+    (void) remote_wakeup_en;
     ESP_LOGI(TAG, "USB device suspended");
-    suspended = true;
-    if (remote_wakeup_en) {
-        ESP_LOGI(TAG, "Remote wakeup available, press the button to wake up the Host");
-        wakeup_host = true;
-    } else {
-        ESP_LOGI(TAG, "Remote wakeup not available");
-    }
 }
 
 void tud_resume_cb(void)
 {
     ESP_LOGI(TAG, "USB device resumed");
-    suspended = false;
+}
+
+/********* Application ***************/
+
+// BOOT button (GPIO0) is active-low. A short press performs a mouse move+click;
+// a long press types a fixed string. All HID output goes through the HID
+// controller queue -- app_main never transmits to TinyUSB directly.
+#define BOOT_POLL_MS        10
+#define BOOT_DEBOUNCE_MS    20
+#define BOOT_LONG_PRESS_MS  600
+#define BOOT_FACTORY_MS     5000   // hold >= 5 s to factory-reset Wi-Fi config
+#define BOOT_SHORT_MOVE     50
+
+static void handle_boot_short_press(void)
+{
+    ESP_LOGI(TAG, "BOOT short press: move + click");
+    input_move_relative(BOOT_SHORT_MOVE, 0);
+    input_click();
+}
+
+static void handle_boot_long_press(void)
+{
+    ESP_LOGI(TAG, "BOOT long press: type text");
+    input_type_text("Hello from ESP32");
 }
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Firmware started");
+
     // Initialize button that will trigger HID reports
     const gpio_config_t boot_button_config = {
         .pin_bit_mask = BIT64(APP_BUTTON),
@@ -188,7 +163,8 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&boot_button_config));
 
     ESP_LOGI(TAG, "USB initialization");
-    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    // Register usb_event_cb so esp_tinyusb forwards mount/unmount (attach/detach) events to us
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG(usb_event_cb);
 
     tusb_cfg.descriptor.device = NULL;
     tusb_cfg.descriptor.full_speed_config = hid_configuration_descriptor;
@@ -201,24 +177,39 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "USB initialization DONE");
 
+    // Start the single HID worker task + command queue
+    ESP_ERROR_CHECK(hid_controller_init());
+
+    // Bring up Wi-Fi (Station if provisioned, else provisioning SoftAP) + HTTP server
+    ESP_ERROR_CHECK(wifi_start());
+    ESP_ERROR_CHECK(control_server_start());
+
+    // Outbound cloud relay client (idle until provisioned via /api/cloud/config).
+    // Never opens an inbound port; only dials out. LAN control above is untouched.
+    ESP_ERROR_CHECK(cloud_client_start());
+
     while (1) {
-        if (tud_mounted()) {
-            static bool send_hid_data = true;
-            if (send_hid_data) {
-                if (!suspended) {
-                    app_send_hid_demo();
+        if (gpio_get_level(APP_BUTTON) == 0) {          // pressed (active-low)
+            vTaskDelay(pdMS_TO_TICKS(BOOT_DEBOUNCE_MS)); // debounce
+            if (gpio_get_level(APP_BUTTON) == 0) {       // still pressed: confirmed
+                // Measure how long the button is held to distinguish short/long
+                uint32_t held_ms = BOOT_DEBOUNCE_MS;
+                while (gpio_get_level(APP_BUTTON) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(BOOT_POLL_MS));
+                    held_ms += BOOT_POLL_MS;
+                }
+                // Button released; one action per physical press
+                if (held_ms >= BOOT_FACTORY_MS) {
+                    // Very long hold: factory-reset Wi-Fi config and reboot.
+                    ESP_LOGW(TAG, "BOOT held %ums: factory reset Wi-Fi", (unsigned)held_ms);
+                    wifi_factory_reset();
+                } else if (held_ms >= BOOT_LONG_PRESS_MS) {
+                    handle_boot_long_press();
                 } else {
-                    if (wakeup_host) {
-                        ESP_LOGI(TAG, "Waking up the Host");
-                        tud_remote_wakeup();
-                        wakeup_host = false;
-                    } else {
-                        ESP_LOGI(TAG, "USB Host remote wakeup is not available.");
-                    }
+                    handle_boot_short_press();
                 }
             }
-            send_hid_data = !gpio_get_level(APP_BUTTON);
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(BOOT_POLL_MS));
     }
 }

@@ -1,0 +1,16 @@
+{
+  "devices": [
+    {
+      "id": "esp32-lab-01",
+      "name": "Lab iPhone Rig #1",
+      "secret": "replace-with-a-long-random-per-device-secret",
+      "ownerId": "dev-operator"
+    },
+    {
+      "id": "esp32-lab-02",
+      "name": "Lab iPhone Rig #2",
+      "secret": "another-long-random-per-device-secret",
+      "ownerId": "dev-operator"
+    }
+  ]
+}

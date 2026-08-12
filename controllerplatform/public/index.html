@@ -1,0 +1,135 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Control Relay — Devices</title>
+<link rel="stylesheet" href="/app.css" />
+
+<header>
+  <h1>ESP32 Control Relay</h1>
+  <div class="row">
+    <span id="who" class="muted"></span>
+    <button id="logout" style="display:none">Log out</button>
+  </div>
+</header>
+
+<main>
+  <!-- Login -->
+  <section id="loginView" class="login card" style="display:none">
+    <h2 style="margin:0">Operator sign in</h2>
+    <input id="username" placeholder="username" autocomplete="username" />
+    <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+    <button id="loginBtn" class="primary">Sign in</button>
+    <div id="loginErr" class="err"></div>
+  </section>
+
+  <!-- Device list -->
+  <section id="devicesView" style="display:none">
+    <div class="row" style="margin-bottom:12px">
+      <span class="status-pill"><span id="wsDot" class="dot"></span><span id="wsText">connecting…</span></span>
+      <div class="spacer"></div>
+    </div>
+    <div id="deviceList"></div>
+    <p id="empty" class="muted" style="display:none">No devices registered for this operator.</p>
+  </section>
+</main>
+
+<script>
+  const TOKEN_KEY = "relay.token";
+  const $ = (id) => document.getElementById(id);
+
+  function fmtLastSeen(ms) {
+    if (!ms) return "never";
+    const d = Math.round((Date.now() - ms) / 1000);
+    if (d < 5) return "just now";
+    if (d < 60) return d + "s ago";
+    if (d < 3600) return Math.round(d / 60) + "m ago";
+    return Math.round(d / 3600) + "h ago";
+  }
+
+  function showLogin() {
+    $("loginView").style.display = "grid";
+    $("devicesView").style.display = "none";
+    $("logout").style.display = "none";
+  }
+
+  async function login() {
+    $("loginErr").textContent = "";
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: $("username").value, password: $("password").value }),
+    });
+    if (!res.ok) {
+      $("loginErr").textContent = "Invalid credentials";
+      return;
+    }
+    const data = await res.json();
+    localStorage.setItem(TOKEN_KEY, data.token);
+    start();
+  }
+
+  function renderDevices(devices) {
+    const list = $("deviceList");
+    list.innerHTML = "";
+    $("empty").style.display = devices.length ? "none" : "block";
+    for (const d of devices) {
+      const row = document.createElement("div");
+      row.className = "device";
+      row.innerHTML = `
+        <span class="dot ${d.online ? "online" : ""}"></span>
+        <div>
+          <div class="name">${escapeHtml(d.name)}</div>
+          <div class="meta muted">${d.online ? "online" : "offline"} · last seen ${fmtLastSeen(d.lastSeen)}
+            ${d.busy ? '· <span class="badge">in use</span>' : ""}
+            ${d.controlledByYou ? '· <span class="badge">you</span>' : ""}
+          </div>
+        </div>
+        <div class="spacer"></div>`;
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = "Control";
+      btn.disabled = !d.online || (d.busy && !d.controlledByYou);
+      btn.onclick = () => {
+        location.href = "/controller.html?device=" + encodeURIComponent(d.id);
+      };
+      row.appendChild(btn);
+      list.appendChild(row);
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  let ws;
+  function connectWs() {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws/browser?token=${encodeURIComponent(token)}`);
+    ws.onopen = () => { $("wsDot").classList.add("online"); $("wsText").textContent = "connected"; };
+    ws.onclose = () => {
+      $("wsDot").classList.remove("online");
+      $("wsText").textContent = "disconnected";
+      // token may be expired
+      setTimeout(() => { if (localStorage.getItem(TOKEN_KEY)) connectWs(); }, 2000);
+    };
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "devices") renderDevices(msg.devices);
+      if (msg.type === "welcome") $("who").textContent = "signed in as " + msg.userId;
+    };
+  }
+
+  function start() {
+    if (!localStorage.getItem(TOKEN_KEY)) return showLogin();
+    $("loginView").style.display = "none";
+    $("devicesView").style.display = "block";
+    $("logout").style.display = "inline-block";
+    connectWs();
+  }
+
+  $("loginBtn").onclick = login;
+  $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+  $("logout").onclick = () => { localStorage.removeItem(TOKEN_KEY); if (ws) ws.close(); showLogin(); };
+
+  start();
+</script>
