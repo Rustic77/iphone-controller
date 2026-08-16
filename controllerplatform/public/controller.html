@@ -6,8 +6,10 @@
 <header>
   <h1><a href="/" style="text-decoration:none;color:inherit">← Devices</a></h1>
   <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
+    <span class="status-pill" id="pillVideo"><span class="dot" id="dotVideo"></span>VIDEO <span id="txtVideo">…</span></span>
     <span class="status-pill" id="pillControl"><span class="dot" id="dotControl"></span>CONTROL <span id="txtControl">…</span></span>
     <span class="status-pill" id="pillHid"><span class="dot" id="dotHid"></span>HID <span id="txtHid">…</span></span>
+    <span class="status-pill" id="pillRtc"><span class="dot" id="dotRtc"></span>WebRTC <span id="txtRtc">…</span></span>
   </div>
 </header>
 
@@ -16,12 +18,24 @@
     <div class="row">
       <strong id="deviceName">device</strong>
       <div class="spacer"></div>
+      <button id="calibrateBtn">CALIBRATE POINTER</button>
       <button id="releaseAll" class="danger">■ RELEASE ALL</button>
     </div>
     <div id="err" class="err"></div>
+    <div class="muted" id="calState" style="margin-top:6px">Calibration: UNCALIBRATED</div>
   </div>
 
-  <div id="pad" class="trackpad">Trackpad · drag to move · tap to click · two-finger / wheel scroll</div>
+  <div class="video-shell" id="videoShell">
+    <video id="remoteVideo" autoplay playsinline muted></video>
+    <div id="videoOverlay" class="video-overlay muted">Waiting for video…</div>
+    <div id="debugOverlay" class="debug-overlay" style="display:none"></div>
+  </div>
+  <p class="muted video-hint">Live video is the click surface (HID via ESP): drag to move · tap to click · scroll. Calibrate for tap-where-you-look. Trackpad below is backup.</p>
+  <label class="muted debug-toggle">
+    <input type="checkbox" id="debugCoords" /> Show normalized coords on video
+  </label>
+
+  <div id="pad" class="trackpad">Backup trackpad · drag to move · tap to click · two-finger / wheel scroll</div>
 
   <div class="controls">
     <button id="leftClick">Left click</button>
@@ -51,6 +65,7 @@
 
 <script>
   const TOKEN_KEY = "relay.token";
+  const STUN = { urls: "stun:stun.l.google.com:19302" };
   const $ = (id) => document.getElementById(id);
   const deviceId = new URLSearchParams(location.search).get("device");
   const token = localStorage.getItem(TOKEN_KEY);
@@ -60,8 +75,14 @@
 
   let seq = 1;
   let claimed = false;
+  let calibrationReady = false;
+  let videoSessionId = null;
   let ws;
+  let pc = null;
   let status = {
+    videoAgentOnline: false,
+    videoStreaming: false,
+    webRtcConnected: false,
     controllerOnline: false,
     hidReady: false,
   };
@@ -78,8 +99,20 @@
   }
 
   function renderStatus() {
+    setPill("dotVideo", "txtVideo", status.videoAgentOnline, "ONLINE", "OFFLINE");
     setPill("dotControl", "txtControl", status.controllerOnline || claimed, "ONLINE", "OFFLINE");
     setPill("dotHid", "txtHid", status.hidReady || claimed, "Ready", "Not ready");
+    setPill("dotRtc", "txtRtc", status.webRtcConnected, "Connected", "Idle");
+    const overlay = $("videoOverlay");
+    if (status.webRtcConnected || status.videoStreaming) {
+      overlay.style.display = "none";
+    } else if (!status.videoAgentOnline) {
+      overlay.style.display = "flex";
+      overlay.textContent = "Video agent offline — start Screen Recording in the iOS app";
+    } else {
+      overlay.style.display = "flex";
+      overlay.textContent = "Waiting for WebRTC…";
+    }
   }
 
   function send(obj) {
@@ -89,6 +122,83 @@
   function sendInput(event) {
     if (!claimed) return;
     send({ type: "input", seq: seq++, ts: Date.now(), event });
+  }
+
+  function teardownPc() {
+    if (pc) {
+      try { pc.close(); } catch (_) {}
+      pc = null;
+    }
+    const v = $("remoteVideo");
+    if (v.srcObject) {
+      for (const t of v.srcObject.getTracks?.() ?? []) t.stop();
+      v.srcObject = null;
+    }
+    status.webRtcConnected = false;
+    renderStatus();
+  }
+
+  async function ensurePeerConnection() {
+    if (pc) return pc;
+    pc = new RTCPeerConnection({ iceServers: [STUN] });
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.ontrack = (ev) => {
+      $("remoteVideo").srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      status.webRtcConnected = true;
+      renderStatus();
+      log("WebRTC remote track received");
+    };
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate || !videoSessionId) return;
+      send({
+        type: "ice_candidate",
+        deviceId,
+        sessionId: videoSessionId,
+        candidate: ev.candidate.candidate,
+        sdpMid: ev.candidate.sdpMid,
+        sdpMLineIndex: ev.candidate.sdpMLineIndex,
+      });
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      status.webRtcConnected = s === "connected";
+      renderStatus();
+      log("WebRTC state: " + s);
+    };
+    return pc;
+  }
+
+  async function handleRemoteOffer(msg) {
+    videoSessionId = msg.sessionId;
+    const peer = await ensurePeerConnection();
+    await peer.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    send({
+      type: "webrtc_answer",
+      deviceId,
+      sessionId: msg.sessionId,
+      sdp: answer.sdp,
+    });
+  }
+
+  async function handleRemoteAnswer(msg) {
+    videoSessionId = msg.sessionId;
+    const peer = await ensurePeerConnection();
+    await peer.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+  }
+
+  async function handleRemoteIce(msg) {
+    if (!pc) return;
+    try {
+      await pc.addIceCandidate({
+        candidate: msg.candidate,
+        sdpMid: msg.sdpMid ?? undefined,
+        sdpMLineIndex: msg.sdpMLineIndex ?? undefined,
+      });
+    } catch (err) {
+      log("ICE add failed: " + err.message);
+    }
   }
 
   function connect() {
@@ -101,18 +211,23 @@
     };
     ws.onclose = () => {
       claimed = false;
+      teardownPc();
       status.controllerOnline = false;
       renderStatus();
       $("pad").classList.remove("active");
+      $("videoShell").classList.remove("active");
     };
-    ws.onmessage = (e) => {
+    ws.onmessage = async (e) => {
       const msg = JSON.parse(e.data);
       switch (msg.type) {
         case "devices": {
           const d = (msg.devices || []).find((x) => x.id === deviceId);
           if (d) {
             status.controllerOnline = !!d.controllerOnline || !!d.online;
+            status.videoAgentOnline = !!d.videoAgentOnline;
+            status.videoStreaming = !!d.videoStreaming;
             status.hidReady = !!d.hidReady;
+            status.webRtcConnected = !!d.webRtcConnected || status.webRtcConnected;
             if (d.name) $("deviceName").textContent = d.name;
             renderStatus();
           }
@@ -125,11 +240,52 @@
           seq = 1;
           log("claimed control (session " + msg.controlSessionId + ")");
           renderStatus();
+          send({ type: "video_subscribe", deviceId });
           break;
         case "claim_failed":
           $("err").textContent = "Cannot control device: " + msg.reason;
           log("claim failed: " + msg.reason);
+          send({ type: "video_subscribe", deviceId });
           renderStatus();
+          break;
+        case "video_status":
+          if (msg.deviceId !== deviceId) break;
+          status.videoAgentOnline = !!msg.videoAgentOnline;
+          status.videoStreaming = !!msg.videoStreaming;
+          status.webRtcConnected = !!msg.webRtcConnected || status.webRtcConnected;
+          if (msg.sessionId) videoSessionId = msg.sessionId;
+          renderStatus();
+          break;
+        case "stream_state":
+          if (msg.deviceId !== deviceId) break;
+          log("stream_state: " + msg.state + (msg.detail ? " (" + msg.detail + ")" : ""));
+          break;
+        case "video_metadata":
+          if (msg.deviceId !== deviceId) break;
+          log("video " + msg.width + "x" + msg.height + (msg.orientation ? " " + msg.orientation : ""));
+          break;
+        case "source_lost":
+          if (msg.deviceId !== deviceId) break;
+          log("source lost: " + (msg.reason || ""));
+          teardownPc();
+          break;
+        case "calibration_state":
+          $("calState").textContent = "Calibration: " + msg.state;
+          calibrationReady = msg.state === "READY";
+          break;
+        case "webrtc_offer":
+          if (msg.deviceId !== deviceId) break;
+          teardownPc();
+          videoSessionId = msg.sessionId;
+          await handleRemoteOffer(msg);
+          break;
+        case "webrtc_answer":
+          if (msg.deviceId !== deviceId) break;
+          await handleRemoteAnswer(msg);
+          break;
+        case "ice_candidate":
+          if (msg.deviceId !== deviceId) break;
+          await handleRemoteIce(msg);
           break;
         case "device_status":
           if (!msg.online) {
@@ -138,6 +294,7 @@
             status.hidReady = false;
             $("err").textContent = "Controller went offline.";
             $("pad").classList.remove("active");
+            $("videoShell").classList.remove("active");
             renderStatus();
           }
           break;
@@ -154,14 +311,33 @@
     };
   }
 
+  const video = $("remoteVideo");
+  const debugOverlay = $("debugOverlay");
   const TAP_SLOP_PX = 10;
+
+  function letterboxNorm(clientX, clientY) {
+    const rect = video.getBoundingClientRect();
+    const vw = video.videoWidth || rect.width;
+    const vh = video.videoHeight || rect.height;
+    if (!vw || !vh || !rect.width || !rect.height) return null;
+
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const contentW = vw * scale;
+    const contentH = vh * scale;
+    const offX = (rect.width - contentW) / 2;
+    const offY = (rect.height - contentH) / 2;
+    const x = (clientX - rect.left - offX) / contentW;
+    const y = (clientY - rect.top - offY) / contentH;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { x, y };
+  }
 
   function click(button) {
     sendInput({ kind: "click", button, pressed: true });
     sendInput({ kind: "click", button, pressed: false });
   }
 
-  function bindTrackpad(el) {
+  function bindPointerSurface(el, { absoluteTaps }) {
     let last = null;
     let downAt = null;
     let dragging = false;
@@ -194,7 +370,17 @@
         sendInput({ kind: "click", button: "left", pressed: false });
         dragging = false;
       } else if (!moved && downAt) {
-        click("left");
+        if (absoluteTaps && calibrationReady) {
+          const n = letterboxNorm(e.clientX, e.clientY);
+          if (n && claimed) {
+            send({ type: "tap_normalized", seq: seq++, ts: Date.now(), x: n.x, y: n.y });
+            log("tap_normalized " + n.x.toFixed(3) + "," + n.y.toFixed(3));
+          } else {
+            click("left");
+          }
+        } else {
+          click("left");
+        }
       }
       last = null;
       downAt = null;
@@ -202,7 +388,7 @@
       try { el.releasePointerCapture(e.pointerId); } catch (_) {}
     });
 
-    el.addEventListener("pointercancel", () => {
+    el.addEventListener("pointercancel", (e) => {
       if (dragging) {
         sendInput({ kind: "click", button: "left", pressed: false });
         dragging = false;
@@ -228,7 +414,20 @@
     el.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
-  bindTrackpad($("pad"));
+  bindPointerSurface($("videoShell"), { absoluteTaps: true });
+  bindPointerSurface($("pad"), { absoluteTaps: false });
+
+  $("videoShell").addEventListener("mousemove", (e) => {
+    if (!$("debugCoords").checked) return;
+    const n = letterboxNorm(e.clientX, e.clientY);
+    debugOverlay.style.display = "block";
+    debugOverlay.textContent = n
+      ? "norm " + n.x.toFixed(3) + ", " + n.y.toFixed(3)
+      : "outside content";
+  });
+  $("debugCoords").onchange = () => {
+    debugOverlay.style.display = $("debugCoords").checked ? "block" : "none";
+  };
 
   $("leftClick").onclick = () => click("left");
   $("rightClick").onclick = () => click("right");
@@ -250,7 +449,16 @@
     log("EMERGENCY: release all sent");
   };
 
-  window.addEventListener("beforeunload", () => { if (ws) ws.close(); });
+  $("calibrateBtn").onclick = () => {
+    if (!claimed) {
+      $("err").textContent = "Claim control before calibrating.";
+      return;
+    }
+    send({ type: "calibrate_pointer" });
+    log("calibrate_pointer requested");
+  };
+
+  window.addEventListener("beforeunload", () => { teardownPc(); if (ws) ws.close(); });
 
   renderStatus();
   connect();

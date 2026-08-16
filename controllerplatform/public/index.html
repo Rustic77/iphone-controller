@@ -75,17 +75,21 @@
       const row = document.createElement("div");
       row.className = "device";
       const controlOn = !!(d.controllerOnline ?? d.online);
+      const videoOn = !!d.videoAgentOnline;
+      const reachable = controlOn || videoOn;
       row.innerHTML = `
-        <span class="dot ${controlOn ? "online" : ""}"></span>
+        <span class="dot ${reachable ? "online" : ""}"></span>
         <div>
           <div class="name">${escapeHtml(d.name)}</div>
           <div class="meta muted">
             HID ${controlOn ? "online" : "offline"}
+            · video ${videoOn ? "online" : "offline"}
+            ${d.videoStreaming ? "· phone screen live" : ""}
             · last seen ${fmtLastSeen(d.lastSeen)}
             ${d.busy ? '· <span class="badge">in use</span>' : ""}
             ${d.controlledByYou ? '· <span class="badge">you</span>' : ""}
           </div>
-          ${controlOn ? "" : '<div class="meta muted">Registered — waiting for ESP (HID).</div>'}
+          ${reachable ? "" : '<div class="meta muted">Registered — waiting for ESP (HID) and/or iOS / Windows video agent.</div>'}
         </div>
         <div class="spacer"></div>`;
       const btn = document.createElement("button");

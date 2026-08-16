@@ -540,6 +540,8 @@ export class Hub {
       { sessionId: conn.sessionId, deviceId, controlSessionId },
       "control session begin",
     );
+    // Controlling browsers also get a video session so WebRTC can start immediately.
+    this.handleVideoSubscribe(conn, deviceId);
     this.notifyOwnerDevices(record.ownerId);
   }
 

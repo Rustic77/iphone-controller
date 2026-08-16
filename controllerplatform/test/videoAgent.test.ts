@@ -76,8 +76,8 @@ describe("device list presence", () => {
   });
 });
 
-describe("claim does not start video", () => {
-  it("does not mint a video session or stream_start on HID claim", () => {
+describe("claim auto-subscribes video", () => {
+  it("mints a video session and sends stream_start on HID claim", () => {
     const { hub, deviceStore } = makeHub();
     connectDevice(hub, deviceStore, "devA");
     const agent = connectAgent(hub, "devA");
@@ -86,8 +86,11 @@ describe("claim does not start video", () => {
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
 
     expect(browser.ofType("claimed")).toHaveLength(1);
-    expect(browser.ofType("video_status")).toHaveLength(0);
-    expect(agent.ofType("stream_start")).toHaveLength(0);
+    const status = browser.ofType("video_status").at(-1);
+    expect(status.sessionId).toBeTruthy();
+    expect(agent.ofType("stream_start").some((m: { sessionId: string }) => m.sessionId === status.sessionId)).toBe(
+      true,
+    );
   });
 });
 
@@ -97,7 +100,7 @@ describe("video session resume", () => {
     connectDevice(hub, deviceStore, "devA");
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
-    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
+    hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
 
     const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
     expect(sessionId).toBeTruthy();
@@ -175,7 +178,6 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
-    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
 
     const status = browser.ofType("video_status").at(-1);
     expect(status.deviceId).toBe("devA");
@@ -209,7 +211,6 @@ describe("WebRTC signaling isolation", () => {
     hub.addBrowser("c1", "userA", browser);
     // userA owns only devA
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
-    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
     const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
 
     browser.clear();
@@ -233,7 +234,6 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
-    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
 
     browser.clear();
     agent.clear();
@@ -256,7 +256,6 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
-    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
     const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
 
     browser.clear();

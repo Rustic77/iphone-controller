@@ -1,0 +1,81 @@
+name: RemotePhoneVideo
+options:
+  bundleIdPrefix: com.remotephone
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    from: "125.0.0"
+settings:
+  SWIFT_VERSION: "5.10"
+  IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+  TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  RemotePhoneCore:
+    type: library.static
+    platform: iOS
+    sources:
+      - RemotePhoneCore
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.remotephone.video.core
+      PRODUCT_MODULE_NAME: RemotePhoneCore
+      SKIP_INSTALL: YES
+      APPLICATION_EXTENSION_API_ONLY: YES
+      DEFINES_MODULE: YES
+    dependencies:
+      - package: WebRTC
+      - sdk: ReplayKit.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+  RemotePhoneVideo:
+    type: application
+    platform: iOS
+    sources:
+      - RemotePhoneVideo
+    resources:
+      - RemotePhoneVideo/Assets.xcassets
+    info:
+      path: RemotePhoneVideo/Info.plist
+    entitlements:
+      path: RemotePhoneVideo/RemotePhoneVideo.entitlements
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.remotephone.video
+      INFOPLIST_FILE: RemotePhoneVideo/Info.plist
+      CODE_SIGN_ENTITLEMENTS: RemotePhoneVideo/RemotePhoneVideo.entitlements
+      GENERATE_INFOPLIST_FILE: false
+    dependencies:
+      - target: RemotePhoneCore
+      - target: BroadcastExtension
+        embed: true
+      - sdk: ReplayKit.framework
+  BroadcastExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - BroadcastExtension
+    info:
+      path: BroadcastExtension/Info.plist
+    entitlements:
+      path: BroadcastExtension/BroadcastExtension.entitlements
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.remotephone.video.broadcast
+      INFOPLIST_FILE: BroadcastExtension/Info.plist
+      CODE_SIGN_ENTITLEMENTS: BroadcastExtension/BroadcastExtension.entitlements
+      GENERATE_INFOPLIST_FILE: false
+      SKIP_INSTALL: YES
+      APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - target: RemotePhoneCore
+      - sdk: ReplayKit.framework
+      - package: WebRTC
+schemes:
+  RemotePhoneVideo:
+    build:
+      targets:
+        RemotePhoneVideo: all
+        BroadcastExtension: all
+        RemotePhoneCore: all

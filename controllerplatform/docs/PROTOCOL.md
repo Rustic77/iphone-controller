@@ -8,7 +8,7 @@ There are **three** independent socket populations:
 
 - **Browser** operator sockets on `/ws/browser`
 - **Device** (ESP32) sockets on `/ws/device` — **CONTROL** path
-- **Agent** (Windows video) sockets on `/ws/agent` — **VIDEO** path
+- **Agent** (iOS ReplayKit or Windows video) sockets on `/ws/agent` — **VIDEO** path
 
 **CONTROL and VIDEO are independent.** An ESP offline does not imply the video
 agent is offline, and vice versa. The server never trusts a socket to name
@@ -128,18 +128,17 @@ marks calibration `READY` at estimated `(0,0)`.
 that has claimed or `video_subscribe`d and that device's video agent. Wrong
 device or stale `sessionId` ⇒ `{ error, reason: "stale_session" | "not_subscribed" | … }`.
 
-A successful `claim` starts HID control only. Video is **not** started from
-the controller UI. `video_subscribe` remains on the wire for a future viewer;
-the operator control page never sends it.
+A successful `claim` also auto-subscribes video for that device.
 
-The Windows video agent **reconnects** to `/ws/agent` with backoff if the hub
+The Windows or iOS video agent **reconnects** to `/ws/agent` with backoff if the hub
 restarts or the socket drops.
 
-**Control is independent of video.** AirPlay / WebRTC never owns HID. The
-controller UI is a trackpad (plus click, scroll, and keyboard). `input`
-(move / click / scroll / keys) is forwarded to the ESP for the whole control
-session. Relative moves still update the pointer-calibration estimate so a
-later `tap_normalized` (if used) stays aligned.
+**Control continues during video.** AirPlay / ReplayKit / WebRTC never owns HID.
+`input` (move / click / scroll / keys) is forwarded to the ESP for the whole
+control session, including while `videoStreaming` is true. The controller UI
+treats the live video as a pointer surface and sends the same `input` events as
+the trackpad. Taps on calibrated video send `tap_normalized`. Relative moves
+update the pointer-calibration estimate so mixed trackpad + tap use stays aligned.
 
 ---
 
@@ -231,7 +230,7 @@ type ServerToAgent =
   | { type: "error"; reason: string };
 ```
 
-On `video_subscribe` the hub mints a `sessionId`,
+On `video_subscribe` (or claim auto-subscribe) the hub mints a `sessionId`,
 sends `stream_start` to the agent, and returns it on `video_status` to the
 browser. WebRTC messages with a mismatched session are rejected as
 `stale_session`. Signaling is never cross-routed to another device's agent.
@@ -263,17 +262,26 @@ The hub emits structured info logs (no secrets, no text contents) for:
 
 ---
 
-## 10. Example session (HID control)
+## 10. Example session (control + video)
 
 ```
 # ESP
 WS  /ws/device  (x-device-id, x-device-secret)
       ← { "type":"hello", "deviceId":"esp32-lab-01" }
 
-# browser (trackpad — no video)
+# iOS (or Windows) video agent
+WS  /ws/agent   (x-device-id, x-agent-id, x-agent-secret)
+      ← { "type":"registered", "deviceId":"esp32-lab-01", "agentId":"ios-agent-01" }
+
+# browser
 WS  /ws/browser?token=...
    → { "type":"claim", "deviceId":"esp32-lab-01" }
       ← { "type":"claimed", … }
-   → { "type":"input", seq, ts, event:{kind:"move"|"click"|"scroll"|…} }
-        device ← { "type":"input", session, seq, event }
+      ← { "type":"video_status", …, "sessionId":"…" }
+        agent ← { "type":"stream_start", "sessionId":"…", "deviceId":"…" }
+   → { "type":"calibrate_pointer" }
+        device ← many { "type":"input", event:{kind:"move",dx:-40,dy:-40} }
+      ← { "type":"calibration_state", "state":"READY" }
+   → { "type":"webrtc_answer", deviceId, sessionId, sdp }
+        agent ← { "type":"webrtc_answer", … }
 ```

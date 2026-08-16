@@ -4,11 +4,9 @@
 
 Let an authenticated operator control a USB-HID iPhone rig (driven by an
 ESP32-S3) from a browser, over the Internet, **without exposing the ESP32** to
-inbound connections or requiring router port forwarding.
-
-The operator UI is **HID only** (trackpad, clicks, keys). A Windows video agent
-may still connect for local AirPlay capture, but the control panel does not
-subscribe to or display a live stream.
+inbound connections or requiring router port forwarding — and independently
+receive a live screen stream from an **iOS ReplayKit agent** (or the lab Windows
+AirPlay agent) via WebRTC.
 
 ## Topology
 
@@ -29,16 +27,17 @@ subscribe to or display a live stream.
       │ outbound WSS       │ outbound WS/WSS
       │ (device secret)    │ (device secret + agent id)
       │                    │
-   ESP32-S3             Windows video agent
-      │  USB HID            │  AirPlay window capture
+   ESP32-S3             iOS ReplayKit agent (or Windows AirPlay agent)
+      │  USB HID            │  screen capture
       ▼                     │  WebRTC media
-   iPhone  ◄── AirPlay ─────┘
+   iPhone  ─────────────────┘
 ```
 
 Key properties:
 
 1. **The ESP32 initiates the connection outward** to the server (CONTROL).
-2. **The Windows agent initiates outward** to `/ws/agent` (VIDEO).
+2. **The video agent initiates outward** to `/ws/agent` (VIDEO) — iOS ReplayKit
+   broadcast extension or the Windows AirPlay agent.
 3. **CONTROL and VIDEO never share a transport.** HID commands never go through
    the agent; media never goes through the ESP. Either path can be up while the
    other is down.
@@ -57,7 +56,7 @@ Three logical endpoints, authenticated **at the HTTP upgrade**:
 
 - `/ws/browser?token=…` — operator sockets. Token verified by `SessionManager`.
 - `/ws/device` — ESP sockets. `x-device-id` + `x-device-secret`.
-- `/ws/agent` — Windows video agent. `x-device-id` + `x-agent-secret`
+- `/ws/agent` — video agent (iOS ReplayKit or Windows). `x-device-id` + `x-agent-secret`
   (verified via `deviceStore.verifyDevice`) + `x-agent-id`.
 
 All are `ws` servers in `noServer` mode; a single `upgrade` handler routes by
@@ -73,8 +72,7 @@ The relay core and policy engine. Transport-agnostic via `Transport`
 - Track connected ESP devices (online/offline, last-seen, current controller).
 - Track connected video agents per `deviceId` (`streaming`, `webRtcConnected`,
   `videoSessionId`).
-- Track browser clients (HID claim; video subscribe is optional and unused by
-  the controller UI).
+- Track browser clients (control claim + optional video subscription).
 - Enforce tenant isolation and single-controller rules.
 - Route HID input to the claimed ESP only.
 - Relay WebRTC signaling **only** between an owner browser (claimed or
@@ -133,15 +131,15 @@ server: verifyDevice → Hub.addVideoAgent → {registered}
 server → owner's browsers: {devices} (videoAgentOnline=true)
 ```
 
-### Operator claims HID
+### Operator claims + video + tap
 ```
 browser → {claim, deviceId}
-Hub: owner? ESP online? free? → control session → {claimed}
-browser → {input} → ESP HID (trackpad / clicks / keys)
+Hub: owner? ESP online? free? → control session + auto video_subscribe
+     → {claimed}; agent ← {stream_start, sessionId}
+browser ↔ agent  (webrtc_* via hub, same deviceId + sessionId)
+browser → {calibrate_pointer} → ESP relative home moves
+browser → {tap_normalized, x, y} → chunked moves + click on ESP
 ```
-
-Claim does **not** auto-subscribe video. The controller page never sends
-`video_subscribe`.
 
 ### Independence
 ```

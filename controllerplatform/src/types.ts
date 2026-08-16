@@ -4,7 +4,7 @@
  * Three independent WebSocket populations connect to the server:
  *   - Devices  (ESP32-S3 firmware) on  /ws/device   → CONTROL path
  *   - Browsers (operator UI)        on  /ws/browser
- *   - Agents   (Windows video)      on  /ws/agent    → VIDEO path
+ *   - Agents   (iOS ReplayKit or Windows video) on  /ws/agent    → VIDEO path
  *
  * CONTROL and VIDEO are independent: an ESP offline does not imply the video
  * agent is offline, and vice versa. The server never trusts a socket to name
@@ -104,7 +104,7 @@ export type ServerToBrowser =
       videoAgentOnline: boolean;
       videoStreaming: boolean;
       webRtcConnected: boolean;
-      /** Present after a successful video_subscribe. Claim does not start video. */
+      /** Present after a successful video_subscribe / claim auto-subscribe. */
       sessionId?: string;
     }
   | {
