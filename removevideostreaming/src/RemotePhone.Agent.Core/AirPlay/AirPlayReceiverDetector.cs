@@ -4,7 +4,7 @@ namespace RemotePhone.Agent.Core.AirPlay;
 
 public static class AirPlayReceiverDetector
 {
-    private static readonly string[] ProcessHints = ["airserver", "reflector"];
+    private static readonly string[] ProcessHints = ["airserver", "reflector", "airplay-windows"];
     private static readonly string[] TitleHints = ["AirServer", "Reflector", "AirPlay"];
 
     public static bool IsLikelyReceiver(string? processName, string? exePath, string? title)

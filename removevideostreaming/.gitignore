@@ -10,3 +10,4 @@ Package.StoreAssociation.xml
 .DS_Store
 *.log
 appsettings.Development.json
+tools/airplay-windows/

@@ -201,6 +201,7 @@ export class Hub {
     this.videoAgents.set(deviceId, conn);
     this.sendAgent(transport, { type: "registered", deviceId, agentId });
     this.log.info({ deviceId, agentId }, "video agent connect");
+    this.resumeVideoIfSubscribed(deviceId, conn);
     this.notifyOwnerDevices(record.ownerId);
     this.broadcastVideoStatus(deviceId);
   }
@@ -233,6 +234,26 @@ export class Hub {
 
     const record = this.deviceStore.getDevice(deviceId);
     if (record) this.notifyOwnerDevices(record.ownerId);
+  }
+
+  /** If a browser already subscribed while the agent was offline, start that session now. */
+  private resumeVideoIfSubscribed(deviceId: string, agent: VideoAgentConn): void {
+    for (const browser of this.browsers.values()) {
+      if (browser.videoDeviceId !== deviceId || !browser.videoSessionId) continue;
+      agent.videoSessionId = browser.videoSessionId;
+      agent.streaming = false;
+      agent.webRtcConnected = false;
+      this.sendAgent(agent.transport, {
+        type: "stream_start",
+        sessionId: browser.videoSessionId,
+        deviceId,
+      });
+      this.log.info(
+        { deviceId, videoSessionId: browser.videoSessionId },
+        "video session resume on agent connect",
+      );
+      return;
+    }
   }
 
   handleAgentMessage(deviceId: string, transport: Transport, msg: AgentToServer): void {
@@ -519,8 +540,6 @@ export class Hub {
       { sessionId: conn.sessionId, deviceId, controlSessionId },
       "control session begin",
     );
-    // Controlling browsers also get a video session so WebRTC can start immediately.
-    this.handleVideoSubscribe(conn, deviceId);
     this.notifyOwnerDevices(record.ownerId);
   }
 
@@ -617,6 +636,9 @@ export class Hub {
 
   /** Emit one HID input to the device with the next outbound session seq. */
   private forwardHid(conn: BrowserConn, device: DeviceConn, event: InputEvent): void {
+    if (event.kind === "move") {
+      conn.calibration.applyRelativeMove(event.dx, event.dy);
+    }
     conn.deviceOutSeq += 1;
     this.send(device.transport, {
       type: "input",
@@ -837,6 +859,7 @@ export class Hub {
       videoAgentOnline: !!agent,
       videoStreaming: agent?.streaming ?? false,
       webRtcConnected: agent?.webRtcConnected ?? false,
+      sessionId: agent?.videoSessionId ?? undefined,
     };
     this.fanoutToVideoBrowsers(deviceId, payload);
   }

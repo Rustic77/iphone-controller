@@ -31,10 +31,10 @@ Browser ──HTTPS/WSS──▶ Cloud control server ◀──outbound WSS─�
 - On device disconnect → the controlling browser sees **offline immediately**.
 - ws-level **heartbeat / timeout** handling.
 - Structured JSON logs (pino via Fastify).
-- Minimal web UI: device list + controller page (live video, trackpad, click,
-  drag, scroll, keyboard text entry, pointer calibration, emergency RELEASE ALL).
-- Windows **video agent** on `/ws/agent` with WebRTC signaling relay and
-  calibrated `tap_normalized` video taps.
+- Minimal web UI: device list + HID controller page (trackpad, click,
+  drag, scroll, keyboard text entry, emergency RELEASE ALL).
+- Optional Windows **video agent** on `/ws/agent` (signaling still exists;
+  the control panel does not stream or click on live video).
 
 ## Tech stack
 

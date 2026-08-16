@@ -25,7 +25,13 @@ public interface IWebRtcStreamingService : IDisposable
     Task ReconnectAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Hook for push-frame stats; implementations update FPS / dimension telemetry.
+    /// Stats-only hook when pixel data is not available. Must not encode a placeholder
+    /// in place of real capture frames.
     /// </summary>
     void NotifyFrame(int width, int height);
+
+    /// <summary>
+    /// Encode and send a tightly packed BGRA8 frame (CPU path).
+    /// </summary>
+    void PushBgraFrame(int width, int height, byte[] bgra);
 }

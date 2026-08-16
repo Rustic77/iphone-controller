@@ -6,10 +6,8 @@
 <header>
   <h1><a href="/" style="text-decoration:none;color:inherit">← Devices</a></h1>
   <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
-    <span class="status-pill" id="pillVideo"><span class="dot" id="dotVideo"></span>VIDEO <span id="txtVideo">…</span></span>
     <span class="status-pill" id="pillControl"><span class="dot" id="dotControl"></span>CONTROL <span id="txtControl">…</span></span>
     <span class="status-pill" id="pillHid"><span class="dot" id="dotHid"></span>HID <span id="txtHid">…</span></span>
-    <span class="status-pill" id="pillRtc"><span class="dot" id="dotRtc"></span>WebRTC <span id="txtRtc">…</span></span>
   </div>
 </header>
 
@@ -18,23 +16,12 @@
     <div class="row">
       <strong id="deviceName">device</strong>
       <div class="spacer"></div>
-      <button id="calibrateBtn">CALIBRATE POINTER</button>
       <button id="releaseAll" class="danger">■ RELEASE ALL</button>
     </div>
     <div id="err" class="err"></div>
-    <div class="muted" id="calState" style="margin-top:6px">Calibration: UNCALIBRATED</div>
   </div>
 
-  <div class="video-shell">
-    <video id="remoteVideo" autoplay playsinline muted></video>
-    <div id="videoOverlay" class="video-overlay muted">Waiting for video…</div>
-    <div id="debugOverlay" class="debug-overlay" style="display:none"></div>
-  </div>
-  <label class="muted debug-toggle">
-    <input type="checkbox" id="debugCoords" /> Show normalized coords on video
-  </label>
-
-  <div id="pad" class="trackpad">Move here to control · click / drag / two-finger scroll</div>
+  <div id="pad" class="trackpad">Trackpad · drag to move · tap to click · two-finger / wheel scroll</div>
 
   <div class="controls">
     <button id="leftClick">Left click</button>
@@ -64,7 +51,6 @@
 
 <script>
   const TOKEN_KEY = "relay.token";
-  const STUN = { urls: "stun:stun.l.google.com:19302" };
   const $ = (id) => document.getElementById(id);
   const deviceId = new URLSearchParams(location.search).get("device");
   const token = localStorage.getItem(TOKEN_KEY);
@@ -74,13 +60,8 @@
 
   let seq = 1;
   let claimed = false;
-  let videoSessionId = null;
   let ws;
-  let pc = null;
   let status = {
-    videoAgentOnline: false,
-    videoStreaming: false,
-    webRtcConnected: false,
     controllerOnline: false,
     hidReady: false,
   };
@@ -97,20 +78,8 @@
   }
 
   function renderStatus() {
-    setPill("dotVideo", "txtVideo", status.videoAgentOnline, "ONLINE", "OFFLINE");
     setPill("dotControl", "txtControl", status.controllerOnline || claimed, "ONLINE", "OFFLINE");
     setPill("dotHid", "txtHid", status.hidReady || claimed, "Ready", "Not ready");
-    setPill("dotRtc", "txtRtc", status.webRtcConnected, "Connected", "Idle");
-    const overlay = $("videoOverlay");
-    if (status.webRtcConnected || status.videoStreaming) {
-      overlay.style.display = "none";
-    } else if (!status.videoAgentOnline) {
-      overlay.style.display = "flex";
-      overlay.textContent = "Video agent offline";
-    } else {
-      overlay.style.display = "flex";
-      overlay.textContent = "Waiting for WebRTC…";
-    }
   }
 
   function send(obj) {
@@ -120,97 +89,6 @@
   function sendInput(event) {
     if (!claimed) return;
     send({ type: "input", seq: seq++, ts: Date.now(), event });
-  }
-
-  function teardownPc() {
-    if (pc) {
-      try { pc.close(); } catch (_) {}
-      pc = null;
-    }
-    const v = $("remoteVideo");
-    if (v.srcObject) {
-      for (const t of v.srcObject.getTracks?.() ?? []) t.stop();
-      v.srcObject = null;
-    }
-    status.webRtcConnected = false;
-    renderStatus();
-  }
-
-  async function ensurePeerConnection() {
-    if (pc) return pc;
-    pc = new RTCPeerConnection({ iceServers: [STUN] });
-    pc.addTransceiver("video", { direction: "recvonly" });
-    pc.ontrack = (ev) => {
-      $("remoteVideo").srcObject = ev.streams[0] || new MediaStream([ev.track]);
-      status.webRtcConnected = true;
-      renderStatus();
-      log("WebRTC remote track received");
-    };
-    pc.onicecandidate = (ev) => {
-      if (!ev.candidate || !videoSessionId) return;
-      send({
-        type: "ice_candidate",
-        deviceId,
-        sessionId: videoSessionId,
-        candidate: ev.candidate.candidate,
-        sdpMid: ev.candidate.sdpMid,
-        sdpMLineIndex: ev.candidate.sdpMLineIndex,
-      });
-    };
-    pc.onconnectionstatechange = () => {
-      const s = pc.connectionState;
-      status.webRtcConnected = s === "connected";
-      renderStatus();
-      log("WebRTC state: " + s);
-    };
-    return pc;
-  }
-
-  async function handleRemoteOffer(msg) {
-    videoSessionId = msg.sessionId;
-    const peer = await ensurePeerConnection();
-    await peer.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    send({
-      type: "webrtc_answer",
-      deviceId,
-      sessionId: msg.sessionId,
-      sdp: answer.sdp,
-    });
-  }
-
-  async function handleRemoteAnswer(msg) {
-    videoSessionId = msg.sessionId;
-    const peer = await ensurePeerConnection();
-    await peer.setRemoteDescription({ type: "answer", sdp: msg.sdp });
-  }
-
-  async function handleRemoteIce(msg) {
-    if (!pc) return;
-    try {
-      await pc.addIceCandidate({
-        candidate: msg.candidate,
-        sdpMid: msg.sdpMid ?? undefined,
-        sdpMLineIndex: msg.sdpMLineIndex ?? undefined,
-      });
-    } catch (err) {
-      log("ICE add failed: " + err.message);
-    }
-  }
-
-  async function startWebrtcAsOfferer() {
-    if (!videoSessionId) return;
-    const peer = await ensurePeerConnection();
-    if (peer.localDescription) return;
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    send({
-      type: "webrtc_offer",
-      deviceId,
-      sessionId: videoSessionId,
-      sdp: offer.sdp,
-    });
   }
 
   function connect() {
@@ -223,22 +101,18 @@
     };
     ws.onclose = () => {
       claimed = false;
-      teardownPc();
       status.controllerOnline = false;
       renderStatus();
       $("pad").classList.remove("active");
     };
-    ws.onmessage = async (e) => {
+    ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       switch (msg.type) {
         case "devices": {
           const d = (msg.devices || []).find((x) => x.id === deviceId);
           if (d) {
             status.controllerOnline = !!d.controllerOnline || !!d.online;
-            status.videoAgentOnline = !!d.videoAgentOnline;
-            status.videoStreaming = !!d.videoStreaming;
             status.hidReady = !!d.hidReady;
-            status.webRtcConnected = !!d.webRtcConnected || status.webRtcConnected;
             if (d.name) $("deviceName").textContent = d.name;
             renderStatus();
           }
@@ -251,55 +125,11 @@
           seq = 1;
           log("claimed control (session " + msg.controlSessionId + ")");
           renderStatus();
-          // Claim auto-subscribes video; ensure we still ask explicitly for older servers.
-          send({ type: "video_subscribe", deviceId });
           break;
         case "claim_failed":
           $("err").textContent = "Cannot control device: " + msg.reason;
           log("claim failed: " + msg.reason);
-          // Still try video-only subscribe.
-          send({ type: "video_subscribe", deviceId });
           renderStatus();
-          break;
-        case "video_status":
-          if (msg.deviceId !== deviceId) break;
-          status.videoAgentOnline = !!msg.videoAgentOnline;
-          status.videoStreaming = !!msg.videoStreaming;
-          status.webRtcConnected = !!msg.webRtcConnected || status.webRtcConnected;
-          if (msg.sessionId) {
-            videoSessionId = msg.sessionId;
-            if (status.videoAgentOnline) startWebrtcAsOfferer().catch((err) => log("offer failed: " + err.message));
-          }
-          renderStatus();
-          break;
-        case "stream_state":
-          if (msg.deviceId !== deviceId) break;
-          log("stream_state: " + msg.state + (msg.detail ? " (" + msg.detail + ")" : ""));
-          break;
-        case "video_metadata":
-          if (msg.deviceId !== deviceId) break;
-          log("video " + msg.width + "x" + msg.height + (msg.orientation ? " " + msg.orientation : ""));
-          break;
-        case "source_lost":
-          if (msg.deviceId !== deviceId) break;
-          log("source lost: " + (msg.reason || ""));
-          teardownPc();
-          break;
-        case "calibration_state":
-          $("calState").textContent = "Calibration: " + msg.state;
-          break;
-        case "webrtc_offer":
-          if (msg.deviceId !== deviceId) break;
-          videoSessionId = msg.sessionId;
-          await handleRemoteOffer(msg);
-          break;
-        case "webrtc_answer":
-          if (msg.deviceId !== deviceId) break;
-          await handleRemoteAnswer(msg);
-          break;
-        case "ice_candidate":
-          if (msg.deviceId !== deviceId) break;
-          await handleRemoteIce(msg);
           break;
         case "device_status":
           if (!msg.online) {
@@ -324,94 +154,81 @@
     };
   }
 
-  /* ---- Video click → tap_normalized (letterboxed) ---- */
-  const video = $("remoteVideo");
-  const debugOverlay = $("debugOverlay");
-
-  function letterboxNorm(clientX, clientY) {
-    const rect = video.getBoundingClientRect();
-    const vw = video.videoWidth || rect.width;
-    const vh = video.videoHeight || rect.height;
-    if (!vw || !vh || !rect.width || !rect.height) return null;
-
-    const scale = Math.min(rect.width / vw, rect.height / vh);
-    const contentW = vw * scale;
-    const contentH = vh * scale;
-    const offX = (rect.width - contentW) / 2;
-    const offY = (rect.height - contentH) / 2;
-    const x = (clientX - rect.left - offX) / contentW;
-    const y = (clientY - rect.top - offY) / contentH;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-    return { x, y };
-  }
-
-  video.addEventListener("click", (e) => {
-    const n = letterboxNorm(e.clientX, e.clientY);
-    if (!n) return;
-    if (!claimed) {
-      log("tap ignored: not controlling");
-      return;
-    }
-    send({ type: "tap_normalized", seq: seq++, ts: Date.now(), x: n.x, y: n.y });
-    log("tap_normalized " + n.x.toFixed(3) + "," + n.y.toFixed(3));
-  });
-
-  video.addEventListener("mousemove", (e) => {
-    if (!$("debugCoords").checked) return;
-    const n = letterboxNorm(e.clientX, e.clientY);
-    debugOverlay.style.display = "block";
-    debugOverlay.textContent = n
-      ? "norm " + n.x.toFixed(3) + ", " + n.y.toFixed(3)
-      : "outside content";
-  });
-  $("debugCoords").onchange = () => {
-    debugOverlay.style.display = $("debugCoords").checked ? "block" : "none";
-  };
-
-  /* ---- Trackpad ---- */
-  const pad = $("pad");
-  let last = null;
-  let dragging = false;
-
-  pad.addEventListener("pointerdown", (e) => {
-    pad.setPointerCapture(e.pointerId);
-    last = { x: e.clientX, y: e.clientY };
-    pad.classList.add("active");
-  });
-
-  pad.addEventListener("pointermove", (e) => {
-    if (!last) return;
-    const dx = e.clientX - last.x;
-    const dy = e.clientY - last.y;
-    last = { x: e.clientX, y: e.clientY };
-    if (dx || dy) sendInput({ kind: "move", dx, dy });
-  });
-
-  pad.addEventListener("pointerup", (e) => {
-    if (dragging) {
-      sendInput({ kind: "click", button: "left", pressed: false });
-      dragging = false;
-    }
-    last = null;
-    pad.classList.remove("active");
-    pad.releasePointerCapture?.(e.pointerId);
-  });
-
-  pad.addEventListener("dblclick", () => {
-    dragging = true;
-    sendInput({ kind: "click", button: "left", pressed: true });
-    log("drag started (double-click to grab, release pad to drop)");
-  });
-
-  pad.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    sendInput({ kind: "scroll", dx: Math.sign(e.deltaX), dy: -Math.sign(e.deltaY) });
-  }, { passive: false });
+  const TAP_SLOP_PX = 10;
 
   function click(button) {
     sendInput({ kind: "click", button, pressed: true });
     sendInput({ kind: "click", button, pressed: false });
   }
+
+  function bindTrackpad(el) {
+    let last = null;
+    let downAt = null;
+    let dragging = false;
+    let moved = false;
+
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      last = { x: e.clientX, y: e.clientY };
+      downAt = { x: e.clientX, y: e.clientY };
+      moved = false;
+      el.classList.add("active");
+    });
+
+    el.addEventListener("pointermove", (e) => {
+      if (!last) return;
+      const dx = e.clientX - last.x;
+      const dy = e.clientY - last.y;
+      last = { x: e.clientX, y: e.clientY };
+      if (downAt && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > TAP_SLOP_PX) {
+        moved = true;
+      }
+      if (dx || dy) sendInput({ kind: "move", dx, dy });
+    });
+
+    el.addEventListener("pointerup", (e) => {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      if (dragging) {
+        sendInput({ kind: "click", button: "left", pressed: false });
+        dragging = false;
+      } else if (!moved && downAt) {
+        click("left");
+      }
+      last = null;
+      downAt = null;
+      el.classList.remove("active");
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    el.addEventListener("pointercancel", () => {
+      if (dragging) {
+        sendInput({ kind: "click", button: "left", pressed: false });
+        dragging = false;
+      }
+      last = null;
+      downAt = null;
+      el.classList.remove("active");
+      sendInput({ kind: "release_all" });
+    });
+
+    el.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      dragging = true;
+      sendInput({ kind: "click", button: "left", pressed: true });
+      log("drag started (double-click to grab, release to drop)");
+    });
+
+    el.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      sendInput({ kind: "scroll", dx: Math.sign(e.deltaX), dy: -Math.sign(e.deltaY) });
+    }, { passive: false });
+
+    el.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+
+  bindTrackpad($("pad"));
 
   $("leftClick").onclick = () => click("left");
   $("rightClick").onclick = () => click("right");
@@ -433,18 +250,7 @@
     log("EMERGENCY: release all sent");
   };
 
-  $("calibrateBtn").onclick = () => {
-    if (!claimed) {
-      $("err").textContent = "Claim control before calibrating.";
-      return;
-    }
-    send({ type: "calibrate_pointer" });
-    log("calibrate_pointer requested");
-  };
-
-  // Capture videoSessionId from video_status; browser may also offer once session is known.
-
-  window.addEventListener("beforeunload", () => { teardownPc(); if (ws) ws.close(); });
+  window.addEventListener("beforeunload", () => { if (ws) ws.close(); });
 
   renderStatus();
   connect();

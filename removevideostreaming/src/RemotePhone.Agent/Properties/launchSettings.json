@@ -1,10 +1,11 @@
 {
   "profiles": {
+    "RemotePhone.Agent (Unpackaged)": {
+      "commandName": "Project",
+      "commandLineArgs": "--start-airplay"
+    },
     "RemotePhone.Agent (Package)": {
       "commandName": "MsixPackage"
-    },
-    "RemotePhone.Agent (Unpackaged)": {
-      "commandName": "Project"
     }
   }
 }

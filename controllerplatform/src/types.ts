@@ -104,7 +104,7 @@ export type ServerToBrowser =
       videoAgentOnline: boolean;
       videoStreaming: boolean;
       webRtcConnected: boolean;
-      /** Present after a successful video_subscribe / claim auto-subscribe. */
+      /** Present after a successful video_subscribe. Claim does not start video. */
       sessionId?: string;
     }
   | {

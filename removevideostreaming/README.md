@@ -18,13 +18,13 @@ CONTROL PATH (existing — do not modify ESP32 firmware in this repo)
 
 VIDEO PATH (this project)
   iPhone
-       │  AirPlay (Wi‑Fi)
+       │  AirPlay (Wi‑Fi or USB Personal Hotspot)
        ▼
-  AirServer / Reflector (Windows)
+  Built-in sidecar (AirPlay-Windows, GPL)  **or**  AirServer / Reflector
        │  HWND capture
        ▼
   RemotePhone Windows Agent
-       │  (Phase 2+) WebRTC
+       │  WebRTC
        ▼
   Remote browser
 ```
@@ -61,7 +61,7 @@ Exact environment:
 | Workload | Desktop development with C++ (for WinUI tooling) recommended |
 | .NET SDK | **.NET 10** (`net10.0` / `net10.0-windows10.0.26100.0`) |
 | UI stack | **WinUI 3** via **Windows App SDK 2.3.1** |
-| AirPlay receiver | **AirServer** or **Reflector** installed and licensed as needed |
+| AirPlay receiver | **Built-in** (agent downloads AirPlay-Windows, GPL-3) **or** AirServer / Reflector |
 | Network | iPhone and PC on the same Wi‑Fi (AirPlay) |
 | Hardware | Existing ESP32 HID path is independent; not required for Phase 1 local preview |
 
@@ -99,7 +99,8 @@ cd c:\esp\removevideostreaming
 # Restore + build Agent (WinUI / Windows App SDK)
 dotnet build src\RemotePhone.Agent\RemotePhone.Agent.csproj -c Debug
 
-# Run packaged WinUI agent (requires Windows App SDK runtime / winapp run support)
+# Run unpackaged (no Windows Developer Mode required).
+# Default launch profile starts built-in AirPlay (--start-airplay).
 dotnet run --project src\RemotePhone.Agent\RemotePhone.Agent.csproj -c Debug
 
 # Unit tests (Core logic only — no Graphics.Capture)
@@ -110,7 +111,23 @@ Optional: open `RemotePhone.sln` in Visual Studio and F5 the `RemotePhone.Agent`
 
 ---
 
-## Phase 1 AirPlay procedure
+## Built-in AirPlay (lab, no AirServer)
+
+The agent can download and run **AirPlay-Windows** (GPL-3, UxPlay port) as a sidecar.
+
+1. Start **RemotePhone.Agent** (`dotnet run` passes `--start-airplay` by default). First run fetches ~13 MB to `%LOCALAPPDATA%\RemotePhone\airplay-windows\`.
+2. Or click **START BUILT-IN AIRPLAY** if you launched without that flag.
+3. Allow the Windows firewall prompt if it appears.
+4. On the iPhone: Control Center → Screen Mirroring → **AirPlay-Windows**.
+5. The agent captures that window and can WebRTC it to the relay UI.
+
+See [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md). DRM apps (Netflix / YouTube / Apple TV+) will not mirror.
+
+AirServer / Reflector still work via **SELECT WINDOW**.
+
+---
+
+## Phase 1 AirPlay procedure (external receiver)
 
 ### 1. Start the receiver
 
@@ -162,7 +179,7 @@ c:\esp\removevideostreaming\
 
 - Local preview only until Phase 2 WebRTC is verified.
 - Detection is heuristic (process / path / title); false positives/negatives possible.
-- Requires a third-party AirPlay receiver; Apple does not provide a first-party Windows AirPlay sink for this flow.
+- Built-in receiver is GPLv3 AirPlay-Windows (lab only); DRM apps do not mirror.
 - Packaged WinUI apps need the correct capabilities (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — `graphicsCapture`).
 - GPU resets / exclusive fullscreen on the receiver can black the capture.
 - SIPSorcery advisory GHSA-28gm-jrmw-xx93 applies when WebRTC packages are used.
@@ -175,7 +192,7 @@ c:\esp\removevideostreaming\
 
 | Doc | Contents |
 |-----|----------|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Control vs video paths, modules, phases |
+| [THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md) | AirPlay-Windows sidecar license / hash |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Detection, black frames, capability, GPU |
 | [PROTOCOL.md](docs/PROTOCOL.md) | Agent WebRTC signaling messages |
 | [FAILURE_MODE_MATRIX.md](docs/FAILURE_MODE_MATRIX.md) | FailureModeCatalog table |

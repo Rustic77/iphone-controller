@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
+using RemotePhone.Agent.Core.AirPlay;
 using RemotePhone.Agent.Core.Configuration;
 using RemotePhone_Agent.AirPlay;
 using RemotePhone_Agent.Capture;
@@ -41,9 +42,16 @@ public partial class App : Application
         var logger = LoggerFactory.CreateLogger("RemotePhone.Agent");
         var airPlay = new AirPlayWindowService(LoggerFactory.CreateLogger("AirPlay"));
         var capture = new WindowCaptureService();
+        var sidecarSpec = new AirPlaySidecarSpec
+        {
+            DownloadUrl = Options.AirPlaySidecarUrl,
+            Sha256 = Options.AirPlaySidecarSha256,
+            Arguments = Options.AirPlaySidecarArguments,
+        };
+        var sidecar = new AirPlaySidecarHost(sidecarSpec, LoggerFactory.CreateLogger("AirPlaySidecar"));
         var signaling = new WebSocketSignalingClient(Options, LoggerFactory.CreateLogger("Signaling"));
         var webRtc = new SipSorceryStreamingService(Options, signaling, LoggerFactory.CreateLogger("WebRtc"));
-        return new MainViewModel(airPlay, capture, Diagnostics, webRtc, Options, logger, dispatcher);
+        return new MainViewModel(airPlay, capture, sidecar, Diagnostics, webRtc, Options, logger, dispatcher);
     }
 
     private void Configure()

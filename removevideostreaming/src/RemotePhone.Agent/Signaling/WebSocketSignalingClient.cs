@@ -40,6 +40,8 @@ public sealed class WebSocketSignalingClient : ISignalingClient, IAsyncDisposabl
 
     public event EventHandler<object>? MessageReceived;
 
+    public event EventHandler? Disconnected;
+
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
         if (IsConnected)
@@ -199,6 +201,13 @@ public sealed class WebSocketSignalingClient : ISignalingClient, IAsyncDisposabl
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Signaling receive loop ended");
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                Disconnected?.Invoke(this, EventArgs.Empty);
+            }
         }
     }
 }

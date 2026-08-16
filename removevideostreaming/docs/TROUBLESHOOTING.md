@@ -35,9 +35,17 @@
 
 ---
 
+## Developer Mode / `Failed to launch application`
+
+The agent runs **unpackaged** (`WindowsPackageType=None`) so `dotnet run` does **not** need Windows Developer Mode.
+
+If you still see that error, you are on an older build that used MSIX identity. Pull this change and run again, or enable Developer Mode: Settings → System → For developers.
+
+---
+
 ## `graphicsCapture` capability
 
-Packaged WinUI / MSIX apps need the Windows Graphics Capture restricted capability (or equivalent declaration for your packaging model) so `GraphicsCaptureItem` / `CreateForWindow` succeeds.
+This agent runs unpackaged and uses `GraphicsCaptureItem.TryCreateFromWindowId`. Packaged WinUI / MSIX apps still need the Windows Graphics Capture restricted capability so capture item creation succeeds.
 
 **If missing or denied:**
 

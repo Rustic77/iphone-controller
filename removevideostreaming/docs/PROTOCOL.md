@@ -109,10 +109,17 @@ Liveness. Both carry:
 
 ---
 
+The control relay (`controllerplatform`) sends **snake_case** types (`stream_start`,
+`webrtc_answer`, `ice_candidate`, `registered`). The agent accepts those aliases
+as well as the PascalCase names in this catalog.
+
 ## Session behavior
 
-1. **Register** → wait for **AgentAuthenticated** (`success: true`).
-2. **StreamStart** assigns / confirms `sessionId`; agent calls `SessionGate.SetSession`.
+1. **Connect** to `/ws/agent` (header auth). Hub replies `registered`.
+2. Wait for **StreamStart** (`stream_start`) — this is the hub's `sessionId`.
+   Do not create a WebRTC offer until this arrives; a locally generated session
+   id is rejected as `stale_session`.
+3. Agent is the offerer: **WebrtcOffer** with the hub session id. Browser answers.
 3. Negotiate **WebrtcOffer** / **WebrtcAnswer** / **IceCandidate** for that session only.
 4. Publish **VideoMetadata** and **StreamState** as capture evolves.
 5. **Heartbeat** ↔ **HeartbeatAck** while connected.

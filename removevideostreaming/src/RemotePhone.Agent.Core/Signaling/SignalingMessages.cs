@@ -165,6 +165,16 @@ public sealed record ErrorMessage : SignalingMessage
 
     [JsonPropertyName("message")]
     public string Message { get; init; } = string.Empty;
+
+    /// <summary>Hub errors use <c>reason</c> instead of <c>message</c>.</summary>
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+
+    [JsonIgnore]
+    public string Display =>
+        !string.IsNullOrWhiteSpace(Message) ? Message :
+        !string.IsNullOrWhiteSpace(Reason) ? Reason! :
+        Code;
 }
 
 public static class SignalingMessageSerializer
@@ -193,13 +203,13 @@ public static class SignalingMessageSerializer
             throw new JsonException("Signaling message is missing required 'type' property.");
         }
 
-        var type = typeElement.GetString()
-            ?? throw new JsonException("Signaling message 'type' property was null.");
+        var type = CanonicalizeType(typeElement.GetString()
+            ?? throw new JsonException("Signaling message 'type' property was null."));
 
         return type switch
         {
             SignalingMessageTypes.AgentRegister => DeserializeAs<AgentRegisterMessage>(json),
-            SignalingMessageTypes.AgentAuthenticated => DeserializeAs<AgentAuthenticatedMessage>(json),
+            SignalingMessageTypes.AgentAuthenticated => DeserializeAuthenticated(json, originalType: typeElement.GetString()),
             SignalingMessageTypes.StreamStart => DeserializeAs<StreamStartMessage>(json),
             SignalingMessageTypes.StreamStop => DeserializeAs<StreamStopMessage>(json),
             SignalingMessageTypes.WebrtcOffer => DeserializeAs<WebrtcOfferMessage>(json),
@@ -211,8 +221,42 @@ public static class SignalingMessageSerializer
             SignalingMessageTypes.StreamState => DeserializeAs<StreamStateMessage>(json),
             SignalingMessageTypes.SourceLost => DeserializeAs<SourceLostMessage>(json),
             SignalingMessageTypes.Error => DeserializeAs<ErrorMessage>(json),
-            _ => throw new JsonException($"Unknown signaling message type '{type}'."),
+            _ => throw new JsonException($"Unknown signaling message type '{typeElement.GetString()}'."),
         };
+    }
+
+    /// <summary>
+    /// The hub speaks snake_case (<c>stream_start</c>); the agent historically spoke PascalCase.
+    /// Accept both so the Windows agent can actually receive StreamStart / SDP / ICE.
+    /// </summary>
+    public static string CanonicalizeType(string type) => type switch
+    {
+        "register" or "AgentRegister" => SignalingMessageTypes.AgentRegister,
+        "registered" or "AgentAuthenticated" => SignalingMessageTypes.AgentAuthenticated,
+        "stream_start" or "StreamStart" => SignalingMessageTypes.StreamStart,
+        "stream_stop" or "StreamStop" => SignalingMessageTypes.StreamStop,
+        "webrtc_offer" or "WebrtcOffer" => SignalingMessageTypes.WebrtcOffer,
+        "webrtc_answer" or "WebrtcAnswer" => SignalingMessageTypes.WebrtcAnswer,
+        "ice_candidate" or "IceCandidate" => SignalingMessageTypes.IceCandidate,
+        "video_metadata" or "VideoMetadata" => SignalingMessageTypes.VideoMetadata,
+        "heartbeat" or "Heartbeat" => SignalingMessageTypes.Heartbeat,
+        "heartbeat_ack" or "HeartbeatAck" => SignalingMessageTypes.HeartbeatAck,
+        "stream_state" or "StreamState" => SignalingMessageTypes.StreamState,
+        "source_lost" or "SourceLost" => SignalingMessageTypes.SourceLost,
+        "error" or "Error" => SignalingMessageTypes.Error,
+        _ => type,
+    };
+
+    private static AgentAuthenticatedMessage DeserializeAuthenticated(string json, string? originalType)
+    {
+        var msg = DeserializeAs<AgentAuthenticatedMessage>(json);
+        // Hub sends { type: "registered" } with no success field; header auth already succeeded.
+        if (string.Equals(originalType, "registered", StringComparison.OrdinalIgnoreCase))
+        {
+            return msg with { Success = true };
+        }
+
+        return msg;
     }
 
     private static T DeserializeAs<T>(string json) where T : SignalingMessage

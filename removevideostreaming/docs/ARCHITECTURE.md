@@ -7,7 +7,7 @@ Control and video are separate forever. The ESP32 never carries video. The video
 ```
 CONTROL                          VIDEO
 =======                          =====
-Browser ──WSS──▶ Hub             iPhone ──AirPlay──▶ AirServer/Reflector
+Browser ──WSS──▶ Hub             iPhone ──AirPlay──▶ sidecar or AirServer
                    │                                      │
                    ▼                                      ▼
                 ESP32-S3                           RemotePhone Agent
@@ -76,8 +76,8 @@ Phase 1 **must** prove local preview before Phase 2 streaming.
 
 ## Data flow (video, Phase 2+)
 
-1. Agent enumerates windows → scores likely AirPlay receivers.
-2. Operator selects HWND → Graphics Capture frame pool → bounded queue (drop oldest).
+    1. Agent downloads/launches AirPlay-Windows sidecar (or user picks AirServer HWND).
+    2. Operator selects HWND → Graphics Capture frame pool → bounded queue (drop oldest).
 3. Preview presents latest GPU frame locally.
 4. Streaming service wraps frames as WebRTC video track; signaling exchanges offer/answer/ICE.
 5. `SessionGate` accepts only the active `sessionId`; stale SDP/ICE dropped.

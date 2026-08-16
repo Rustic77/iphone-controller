@@ -128,7 +128,18 @@ marks calibration `READY` at estimated `(0,0)`.
 that has claimed or `video_subscribe`d and that device's video agent. Wrong
 device or stale `sessionId` ⇒ `{ error, reason: "stale_session" | "not_subscribed" | … }`.
 
-A successful `claim` also auto-subscribes video for that device.
+A successful `claim` starts HID control only. Video is **not** started from
+the controller UI. `video_subscribe` remains on the wire for a future viewer;
+the operator control page never sends it.
+
+The Windows video agent **reconnects** to `/ws/agent` with backoff if the hub
+restarts or the socket drops.
+
+**Control is independent of video.** AirPlay / WebRTC never owns HID. The
+controller UI is a trackpad (plus click, scroll, and keyboard). `input`
+(move / click / scroll / keys) is forwarded to the ESP for the whole control
+session. Relative moves still update the pointer-calibration estimate so a
+later `tap_normalized` (if used) stays aligned.
 
 ---
 
@@ -220,7 +231,7 @@ type ServerToAgent =
   | { type: "error"; reason: string };
 ```
 
-On `video_subscribe` (or claim auto-subscribe) the hub mints a `sessionId`,
+On `video_subscribe` the hub mints a `sessionId`,
 sends `stream_start` to the agent, and returns it on `video_status` to the
 browser. WebRTC messages with a mismatched session are rejected as
 `stale_session`. Signaling is never cross-routed to another device's agent.
@@ -252,26 +263,17 @@ The hub emits structured info logs (no secrets, no text contents) for:
 
 ---
 
-## 10. Example session (control + video)
+## 10. Example session (HID control)
 
 ```
 # ESP
 WS  /ws/device  (x-device-id, x-device-secret)
       ← { "type":"hello", "deviceId":"esp32-lab-01" }
 
-# Windows agent
-WS  /ws/agent   (x-device-id, x-agent-id, x-agent-secret)
-      ← { "type":"registered", "deviceId":"esp32-lab-01", "agentId":"windows-agent-01" }
-
-# browser
+# browser (trackpad — no video)
 WS  /ws/browser?token=...
    → { "type":"claim", "deviceId":"esp32-lab-01" }
       ← { "type":"claimed", … }
-      ← { "type":"video_status", …, "sessionId":"…" }
-        agent ← { "type":"stream_start", "sessionId":"…", "deviceId":"…" }
-   → { "type":"calibrate_pointer" }
-        device ← many { "type":"input", event:{kind:"move",dx:-40,dy:-40} }
-      ← { "type":"calibration_state", "state":"READY" }
-   → { "type":"webrtc_offer", deviceId, sessionId, sdp }
-        agent ← { "type":"webrtc_offer", … }
+   → { "type":"input", seq, ts, event:{kind:"move"|"click"|"scroll"|…} }
+        device ← { "type":"input", session, seq, event }
 ```

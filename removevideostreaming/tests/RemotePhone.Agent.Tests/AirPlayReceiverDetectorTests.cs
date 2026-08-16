@@ -14,6 +14,8 @@ public class AirPlayReceiverDetectorTests
     [InlineData(null, null, "AirServer Universal")]
     [InlineData(null, null, "Reflector 4")]
     [InlineData(null, null, "AirPlay Receiver")]
+    [InlineData("airplay-windows", null, null)]
+    [InlineData("AirPlay-Windows", null, "AirPlay-Windows")]
     public void IsLikelyReceiver_matches_process_exe_or_title(string? process, string? exe, string? title)
     {
         AirPlayReceiverDetector.IsLikelyReceiver(process, exe, title).Should().BeTrue();

@@ -11,6 +11,10 @@
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- Lab/unpackaged: dotnet run must not require Windows Developer Mode. -->
+    <EnableWinAppRunSupport>false</EnableWinAppRunSupport>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>

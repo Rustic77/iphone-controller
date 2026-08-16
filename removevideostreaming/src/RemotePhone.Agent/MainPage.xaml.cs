@@ -26,6 +26,12 @@ public sealed partial class MainPage : Page
         PreviewImage.Source = _previewBridge.EnsureSource();
         ViewModel.PreviewFrameReady += OnPreviewFrameReady;
         ViewModel.RefreshReceiversCommand.Execute(null);
+
+        if (Environment.GetCommandLineArgs().Any(a =>
+                string.Equals(a, "--start-airplay", StringComparison.OrdinalIgnoreCase)))
+        {
+            _ = ViewModel.StartBuiltInAirPlayCommand.ExecuteAsync(null);
+        }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)

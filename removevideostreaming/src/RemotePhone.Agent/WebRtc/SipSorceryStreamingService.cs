@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using RemotePhone.Agent.Core.Configuration;
+using RemotePhone.Agent.Core.Models;
 using RemotePhone.Agent.Core.Reliability;
 using RemotePhone.Agent.Core.Signaling;
 using RemotePhone.Agent.Core.WebRtc;
@@ -30,8 +31,10 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
     private RTCPeerConnection? _pc;
     private CaptureVideoSource? _videoSource;
     private CancellationTokenSource? _cts;
+    private readonly SemaphoreSlim _sessionLock = new(1, 1);
     private bool _sourceLost;
     private bool _disposed;
+    private int _signalingReconnectBusy;
 
     public SipSorceryStreamingService(AgentOptions options, ISignalingClient signaling, ILogger logger)
     {
@@ -39,6 +42,7 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
         _signaling = signaling ?? throw new ArgumentNullException(nameof(signaling));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _signaling.MessageReceived += OnSignalingMessage;
+        _signaling.Disconnected += OnSignalingDisconnected;
     }
 
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
@@ -69,12 +73,16 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
             }, _cts.Token).ConfigureAwait(false);
         }
 
-        await CreatePeerConnectionAsync(_cts.Token).ConfigureAwait(false);
+        // Do not create a peer connection yet. The hub assigns the video
+        // sessionId via stream_start; offering with a local Guid is rejected
+        // as stale_session and never reaches the browser.
+        _logger.LogInformation("Signaling connected; waiting for stream_start");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         SetState(ConnectionState.Disconnected);
+        var sessionId = _sessionGate.CurrentSessionId;
         await TeardownPeerAsync().ConfigureAwait(false);
         _sessionGate.Clear();
 
@@ -84,7 +92,7 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
             {
                 AgentId = _options.AgentId,
                 DeviceId = _options.DeviceId,
-                SessionId = _sessionGate.CurrentSessionId,
+                SessionId = sessionId,
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -125,8 +133,63 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
         SetState(ConnectionState.Failed);
     }
 
+    private void OnSignalingDisconnected(object? sender, EventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        var cts = _cts;
+        if (cts is null || cts.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _signalingReconnectBusy, 1) == 1)
+        {
+            return;
+        }
+
+        _logger.LogWarning("Hub signaling dropped; reconnecting so the control panel can see this phone");
+        _ = ReconnectSignalingAsync(cts.Token);
+    }
+
+    private async Task ReconnectSignalingAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ReconnectAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Signaling reconnect ended");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _signalingReconnectBusy, 0);
+        }
+    }
+
     public void NotifyFrame(int width, int height)
     {
+        if (_sourceLost || State is not (ConnectionState.Connected or ConnectionState.Connecting))
+        {
+            DroppedFrames++;
+        }
+
+        _ = width;
+        _ = height;
+        // Stats-only. Encoding a placeholder here would flash a test pattern over real video.
+    }
+
+    public void PushBgraFrame(int width, int height, byte[] bgra)
+    {
+        ArgumentNullException.ThrowIfNull(bgra);
         if (_sourceLost || State is not (ConnectionState.Connected or ConnectionState.Connecting))
         {
             DroppedFrames++;
@@ -144,29 +207,7 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
 
         try
         {
-            _videoSource?.PushBgraFrame(width, height, bgra: null);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "NotifyFrame encode/push failed; capture continues");
-            DroppedFrames++;
-        }
-    }
-
-    /// <summary>
-    /// Optional path: push real BGRA pixels when the capture preview converter provides them.
-    /// </summary>
-    public void PushBgraFrame(int width, int height, byte[] bgra)
-    {
-        if (_sourceLost)
-        {
-            return;
-        }
-
-        try
-        {
             _videoSource?.PushBgraFrame(width, height, bgra);
-            NotifyFrame(width, height);
         }
         catch (Exception ex)
         {
@@ -196,12 +237,64 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
 
         _disposed = true;
         _signaling.MessageReceived -= OnSignalingMessage;
+        _signaling.Disconnected -= OnSignalingDisconnected;
         _cts?.Cancel();
         _cts?.Dispose();
         _ = TeardownPeerAsync();
     }
 
-    private async Task CreatePeerConnectionAsync(CancellationToken cancellationToken)
+    private async Task HandleStreamStartAsync(StreamStartMessage start)
+    {
+        if (string.IsNullOrWhiteSpace(start.SessionId))
+        {
+            _logger.LogWarning("Ignoring stream_start with empty sessionId");
+            return;
+        }
+
+        await _sessionLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _sourceLost = false;
+            await TeardownPeerAsync().ConfigureAwait(false);
+            _sessionGate.SetSession(start.SessionId);
+            var token = _cts?.Token ?? CancellationToken.None;
+            _logger.LogInformation("stream_start session={SessionId}", start.SessionId);
+            await CreatePeerConnectionAsync(start.SessionId, token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to start WebRTC session {SessionId}", start.SessionId);
+            Faulted?.Invoke(this, ex);
+            SetState(ConnectionState.Failed);
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    private async Task HandleStreamStopAsync(StreamStopMessage stop)
+    {
+        await _sessionLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (stop.SessionId is not null && !_sessionGate.Accept(stop.SessionId))
+            {
+                _logger.LogDebug("Ignoring stale stream_stop session={SessionId}", stop.SessionId);
+                return;
+            }
+
+            await TeardownPeerAsync().ConfigureAwait(false);
+            _sessionGate.Clear();
+            SetState(ConnectionState.Disconnected);
+        }
+        finally
+        {
+            _sessionLock.Release();
+        }
+    }
+
+    private async Task CreatePeerConnectionAsync(string sessionId, CancellationToken cancellationToken)
     {
         var iceServers = new List<RTCIceServer>();
         foreach (var stun in _options.StunServers ?? [])
@@ -281,18 +374,7 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
             _videoSource = videoSource;
         }
 
-        var sessionId = Guid.NewGuid().ToString("N");
-        _sessionGate.SetSession(sessionId);
-
-        await _signaling.SendAsync(new StreamStartMessage
-        {
-            AgentId = _options.AgentId,
-            DeviceId = _options.DeviceId,
-            SessionId = sessionId,
-            PreferredResolution = _options.PreferredResolution,
-            PreferredFps = _options.PreferredFps,
-            PreferredBitrate = _options.PreferredBitrate,
-        }, cancellationToken).ConfigureAwait(false);
+        await videoSource.StartVideo().ConfigureAwait(false);
 
         var offer = pc.createOffer();
         await pc.setLocalDescription(offer).ConfigureAwait(false);
@@ -305,9 +387,17 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
             Sdp = offer.sdp ?? string.Empty,
         }, cancellationToken).ConfigureAwait(false);
 
-        // Kick a placeholder frame so encoders initialize even before capture notifies.
+        // Kick a placeholder so the encoder initializes before the first capture frame.
         videoSource.PushBgraFrame(640, 360, bgra: null);
         SetState(ConnectionState.Connecting);
+        _ = SafeSendAsync(new StreamStateMessage
+        {
+            AgentId = _options.AgentId,
+            DeviceId = _options.DeviceId,
+            SessionId = sessionId,
+            State = CaptureState.Capturing,
+            Detail = "offering",
+        });
     }
 
     private void OnSignalingMessage(object? sender, object message)
@@ -361,9 +451,17 @@ public sealed class SipSorceryStreamingService : IWebRtcStreamingService
                     _logger.LogInformation("AgentAuthenticated Success={Success} Message={Message}", auth.Success, auth.Message);
                     break;
 
+                case StreamStartMessage start:
+                    _ = HandleStreamStartAsync(start);
+                    break;
+
+                case StreamStopMessage stop:
+                    _ = HandleStreamStopAsync(stop);
+                    break;
+
                 case ErrorMessage error:
-                    _logger.LogWarning("Signaling error {Code}: {Message}", error.Code, error.Message);
-                    Faulted?.Invoke(this, new InvalidOperationException(error.Message));
+                    _logger.LogWarning("Signaling error {Code}: {Message}", error.Code, error.Display);
+                    Faulted?.Invoke(this, new InvalidOperationException(error.Display));
                     break;
             }
         }

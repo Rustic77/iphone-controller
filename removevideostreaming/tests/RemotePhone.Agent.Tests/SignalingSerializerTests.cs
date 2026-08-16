@@ -87,6 +87,47 @@ public class SignalingSerializerTests
     }
 
     [Fact]
+    public void Deserialize_hub_snake_case_stream_start_and_answer()
+    {
+        var start = SignalingMessageSerializer.Deserialize(
+                """{"type":"stream_start","sessionId":"hub-session","deviceId":"esp32-lab-01"}""")
+            .Should().BeOfType<StreamStartMessage>().Subject;
+        start.SessionId.Should().Be("hub-session");
+        start.DeviceId.Should().Be("esp32-lab-01");
+
+        var answer = SignalingMessageSerializer.Deserialize(
+                """{"type":"webrtc_answer","sessionId":"hub-session","sdp":"v=0","deviceId":"esp32-lab-01"}""")
+            .Should().BeOfType<WebrtcAnswerMessage>().Subject;
+        answer.Sdp.Should().Be("v=0");
+        answer.SessionId.Should().Be("hub-session");
+
+        var ice = SignalingMessageSerializer.Deserialize(
+                """{"type":"ice_candidate","sessionId":"hub-session","candidate":"candidate:1","sdpMid":"0","sdpMLineIndex":0}""")
+            .Should().BeOfType<IceCandidateMessage>().Subject;
+        ice.Candidate.Should().Be("candidate:1");
+    }
+
+    [Fact]
+    public void Deserialize_hub_registered_is_authenticated_success()
+    {
+        var auth = SignalingMessageSerializer.Deserialize(
+                """{"type":"registered","deviceId":"esp32-lab-01","agentId":"windows-agent-01"}""")
+            .Should().BeOfType<AgentAuthenticatedMessage>().Subject;
+        auth.Success.Should().BeTrue();
+        auth.DeviceId.Should().Be("esp32-lab-01");
+        auth.AgentId.Should().Be("windows-agent-01");
+    }
+
+    [Fact]
+    public void Deserialize_hub_error_reason()
+    {
+        var err = SignalingMessageSerializer.Deserialize(
+                """{"type":"error","reason":"stale_session"}""")
+            .Should().BeOfType<ErrorMessage>().Subject;
+        err.Display.Should().Be("stale_session");
+    }
+
+    [Fact]
     public void Deserialize_unknown_type_throws()
     {
         var act = () => SignalingMessageSerializer.Deserialize("""{"type":"Nope"}""");

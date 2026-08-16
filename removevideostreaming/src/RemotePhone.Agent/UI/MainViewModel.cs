@@ -18,6 +18,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly AirPlayWindowService _airPlayService;
     private readonly WindowCaptureService _captureService;
+    private readonly AirPlaySidecarHost _sidecar;
     private readonly DiagnosticsService _diagnostics;
     private readonly IWebRtcStreamingService _webRtc;
     private readonly AgentOptions _options;
@@ -29,6 +30,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     public MainViewModel(
         AirPlayWindowService airPlayService,
         WindowCaptureService captureService,
+        AirPlaySidecarHost sidecar,
         DiagnosticsService diagnostics,
         IWebRtcStreamingService webRtc,
         AgentOptions options,
@@ -37,6 +39,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         _airPlayService = airPlayService ?? throw new ArgumentNullException(nameof(airPlayService));
         _captureService = captureService ?? throw new ArgumentNullException(nameof(captureService));
+        _sidecar = sidecar ?? throw new ArgumentNullException(nameof(sidecar));
         _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         _webRtc = webRtc ?? throw new ArgumentNullException(nameof(webRtc));
         _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -54,6 +57,8 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             LastError = ex.Message;
             RefreshDiagnostics();
         });
+
+        _ = ConnectSignalingAsync();
     }
 
     public ObservableCollection<ReceiverWindowInfo> Receivers { get; } = new();
@@ -134,6 +139,69 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
     }
 
     [RelayCommand]
+    private async Task StartBuiltInAirPlayAsync()
+    {
+        LastError = "Installing built-in AirPlay receiver (first run downloads ~13 MB)…";
+        RefreshDiagnostics();
+
+        try
+        {
+            await _sidecar.StartAsync().ConfigureAwait(true);
+            LastError = "Waiting for AirPlay-Windows window…";
+            RefreshDiagnostics();
+
+            ReceiverWindowInfo? found = null;
+            for (var i = 0; i < 40; i++)
+            {
+                RefreshReceivers();
+                found = Receivers.FirstOrDefault(r =>
+                    r.ProcessName.Contains("airplay-windows", StringComparison.OrdinalIgnoreCase));
+                if (found is not null)
+                {
+                    break;
+                }
+
+                await Task.Delay(250).ConfigureAwait(true);
+            }
+
+            if (found is null)
+            {
+                LastError =
+                    "Sidecar started but no window yet. Allow the Windows firewall prompt, then Refresh.";
+                RefreshDiagnostics();
+                return;
+            }
+
+            SelectedReceiver = found;
+            await SelectAirPlayWindowAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            FaultNote(ex);
+        }
+
+        RefreshDiagnostics();
+    }
+
+    [RelayCommand]
+    private async Task StopBuiltInAirPlayAsync()
+    {
+        try
+        {
+            await _captureService.StopAsync().ConfigureAwait(true);
+            await _sidecar.StopAsync().ConfigureAwait(true);
+            CaptureStatus = _captureService.State.ToString();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+
+        RefreshDiagnostics();
+    }
+
+    [RelayCommand]
     private async Task SelectAirPlayWindowAsync()
     {
         if (SelectedReceiver is null)
@@ -159,6 +227,7 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
             SourceResolution = $"{_captureService.Stats.Width}x{_captureService.Stats.Height}";
             Orientation = _captureService.Stats.Orientation.ToString();
             LastError = null;
+            _ = ConnectSignalingAsync();
         }
         catch (Exception ex)
         {
@@ -167,6 +236,24 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         }
 
         RefreshDiagnostics();
+    }
+
+    private async Task ConnectSignalingAsync()
+    {
+        try
+        {
+            await _webRtc.StartAsync().ConfigureAwait(true);
+            RunOnUi(SyncWebRtcStats);
+        }
+        catch (Exception ex)
+        {
+            RunOnUi(() =>
+            {
+                LastError = ex.Message;
+                FaultNote(ex);
+                RefreshDiagnostics();
+            });
+        }
     }
 
     [RelayCommand]
@@ -263,13 +350,23 @@ public sealed partial class MainViewModel : ObservableObject, IAsyncDisposable
         _captureService.MetadataChanged -= OnMetadataChanged;
         _captureService.SourceLost -= OnSourceLost;
         await _captureService.DisposeAsync().ConfigureAwait(false);
+        await _sidecar.DisposeAsync().ConfigureAwait(false);
         _webRtc.Dispose();
     }
 
     private void OnCaptureFrameArrived(object? sender, FrameArrivedEventArgs e)
     {
-        _webRtc.NotifyFrame(e.Width, e.Height);
         var preview = e.PreviewBitmap;
+        if (preview is not null &&
+            SoftwareBitmapFrameConverter.TryCopyToBgra(preview, out var bgra, out var w, out var h))
+        {
+            _webRtc.PushBgraFrame(w, h, bgra);
+        }
+        else
+        {
+            _webRtc.NotifyFrame(e.Width, e.Height);
+        }
+
         RunOnUi(() =>
         {
             CaptureFps = _captureService.Stats.Fps;

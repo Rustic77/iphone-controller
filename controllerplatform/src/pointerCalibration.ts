@@ -99,6 +99,17 @@ export class PointerCalibration {
   }
 
   /**
+   * Keep the estimated cursor in sync with operator relative HID (trackpad /
+   * video drag). Absolute `tap_normalized` stays accurate after mixed use.
+   */
+  applyRelativeMove(dx: number, dy: number): void {
+    if (this.state !== "READY") return;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    this.estimatedX = clamp(this.estimatedX + dx, 0, this.screenWidth);
+    this.estimatedY = clamp(this.estimatedY + dy, 0, this.screenHeight);
+  }
+
+  /**
    * Apply orientation from agent video_metadata. Changing orientation
    * invalidates the estimated cursor position.
    */

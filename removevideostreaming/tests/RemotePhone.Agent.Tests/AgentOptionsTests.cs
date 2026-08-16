@@ -1,6 +1,7 @@
 using System.Text;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
+using RemotePhone.Agent.Core.AirPlay;
 using RemotePhone.Agent.Core.Configuration;
 
 namespace RemotePhone.Agent.Tests;
@@ -60,7 +61,9 @@ public class AgentOptionsTests
 
         options.ServerUrl.Should().BeEmpty();
         options.FrameQueueCapacity.Should().Be(3);
-        options.ReceiverProcessHints.Should().Equal("AirServer", "Reflector");
+        options.ReceiverProcessHints.Should().Equal("AirServer", "Reflector", "airplay-windows");
+        options.AirPlaySidecarUrl.Should().Be(AirPlaySidecarSpec.DefaultDownloadUrl);
+        options.AirPlaySidecarSha256.Should().Be(AirPlaySidecarSpec.DefaultSha256);
         options.StunServers.Should().BeEmpty();
         options.TurnServers.Should().BeEmpty();
     }

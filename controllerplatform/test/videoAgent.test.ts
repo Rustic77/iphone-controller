@@ -7,6 +7,113 @@ function connectAgent(hub: ReturnType<typeof makeHub>["hub"], deviceId: string, 
   return t;
 }
 
+describe("HID independence from video", () => {
+  it("forwards move, click, and scroll to the ESP while a video session is streaming", () => {
+    const { hub, deviceStore, clock } = makeHub();
+    const device = connectDevice(hub, deviceStore, "devA");
+    connectAgent(hub, "devA");
+    const browser = new FakeTransport();
+    hub.addBrowser("c1", "userA", browser);
+    hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+    device.clear();
+
+    const now = clock.now();
+    hub.handleBrowserMessage("c1", {
+      type: "input",
+      seq: 1,
+      ts: now,
+      event: { kind: "move", dx: 4, dy: -2 },
+    });
+    hub.handleBrowserMessage("c1", {
+      type: "input",
+      seq: 2,
+      ts: now,
+      event: { kind: "click", button: "left", pressed: true },
+    });
+    hub.handleBrowserMessage("c1", {
+      type: "input",
+      seq: 3,
+      ts: now,
+      event: { kind: "click", button: "left", pressed: false },
+    });
+    hub.handleBrowserMessage("c1", {
+      type: "input",
+      seq: 4,
+      ts: now,
+      event: { kind: "scroll", dx: 0, dy: 3 },
+    });
+
+    expect(device.ofType("input").map((m) => m.event)).toEqual([
+      { kind: "move", dx: 4, dy: -2 },
+      { kind: "click", button: "left", pressed: true },
+      { kind: "click", button: "left", pressed: false },
+      { kind: "scroll", dx: 0, dy: 3 },
+    ]);
+  });
+});
+
+describe("device list presence", () => {
+  it("lists owned devices even when ESP and video agent are both offline", () => {
+    const { hub } = makeHub();
+    const browser = new FakeTransport();
+    hub.addBrowser("c1", "userA", browser);
+    const devices = browser.ofType("devices").at(-1).devices;
+    expect(devices).toHaveLength(1);
+    expect(devices[0].id).toBe("devA");
+    expect(devices[0].controllerOnline).toBe(false);
+    expect(devices[0].videoAgentOnline).toBe(false);
+    expect(devices[0].hidReady).toBe(false);
+  });
+
+  it("marks the rig live when the video agent connects without an ESP", () => {
+    const { hub } = makeHub();
+    const browser = new FakeTransport();
+    hub.addBrowser("c1", "userA", browser);
+    connectAgent(hub, "devA");
+    const d = browser.ofType("devices").at(-1).devices.find((x: { id: string }) => x.id === "devA");
+    expect(d.videoAgentOnline).toBe(true);
+    expect(d.controllerOnline).toBe(false);
+  });
+});
+
+describe("claim does not start video", () => {
+  it("does not mint a video session or stream_start on HID claim", () => {
+    const { hub, deviceStore } = makeHub();
+    connectDevice(hub, deviceStore, "devA");
+    const agent = connectAgent(hub, "devA");
+    const browser = new FakeTransport();
+    hub.addBrowser("c1", "userA", browser);
+    hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+
+    expect(browser.ofType("claimed")).toHaveLength(1);
+    expect(browser.ofType("video_status")).toHaveLength(0);
+    expect(agent.ofType("stream_start")).toHaveLength(0);
+  });
+});
+
+describe("video session resume", () => {
+  it("sends stream_start when the agent connects after the browser already subscribed", () => {
+    const { hub, deviceStore } = makeHub();
+    connectDevice(hub, deviceStore, "devA");
+    const browser = new FakeTransport();
+    hub.addBrowser("c1", "userA", browser);
+    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
+
+    const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
+    expect(sessionId).toBeTruthy();
+
+    const agent = new FakeTransport();
+    hub.addVideoAgent("devA", "agent-late", agent);
+
+    expect(agent.ofType("stream_start").some((m: { sessionId: string }) => m.sessionId === sessionId)).toBe(
+      true,
+    );
+    const resumed = browser.ofType("video_status").at(-1);
+    expect(resumed.videoAgentOnline).toBe(true);
+    expect(resumed.sessionId).toBe(sessionId);
+  });
+});
+
 describe("video agent online flags", () => {
   it("reports videoAgentOnline independently of ESP controller", () => {
     const { hub } = makeHub();
@@ -68,6 +175,7 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
 
     const status = browser.ofType("video_status").at(-1);
     expect(status.deviceId).toBe("devA");
@@ -101,6 +209,7 @@ describe("WebRTC signaling isolation", () => {
     hub.addBrowser("c1", "userA", browser);
     // userA owns only devA
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
     const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
 
     browser.clear();
@@ -124,6 +233,7 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
 
     browser.clear();
     agent.clear();
@@ -146,6 +256,7 @@ describe("WebRTC signaling isolation", () => {
     const browser = new FakeTransport();
     hub.addBrowser("c1", "userA", browser);
     hub.handleBrowserMessage("c1", { type: "claim", deviceId: "devA" });
+    hub.handleBrowserMessage("c1", { type: "video_subscribe", deviceId: "devA" });
     const sessionId = browser.ofType("video_status").at(-1).sessionId as string;
 
     browser.clear();

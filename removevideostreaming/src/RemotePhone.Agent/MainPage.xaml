@@ -50,12 +50,20 @@
                 </ListView.ItemTemplate>
             </ListView>
 
-            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-                <Button Command="{x:Bind ViewModel.RefreshReceiversCommand}" Content="Refresh" />
-                <Button
-                    Command="{x:Bind ViewModel.SelectAirPlayWindowCommand}"
-                    Content="SELECT AIRPLAY WINDOW"
-                    Style="{StaticResource AccentButtonStyle}" />
+            <StackPanel Grid.Row="2" Spacing="8">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Command="{x:Bind ViewModel.RefreshReceiversCommand}" Content="Refresh" />
+                    <Button
+                        Command="{x:Bind ViewModel.SelectAirPlayWindowCommand}"
+                        Content="SELECT WINDOW"
+                        Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button
+                        Command="{x:Bind ViewModel.StartBuiltInAirPlayCommand}"
+                        Content="START BUILT-IN AIRPLAY" />
+                    <Button Command="{x:Bind ViewModel.StopBuiltInAirPlayCommand}" Content="STOP BUILT-IN" />
+                </StackPanel>
             </StackPanel>
 
             <TextBlock
@@ -182,6 +190,6 @@
             Grid.Row="1"
             Grid.ColumnSpan="3"
             Opacity="0.7"
-            Text="Preview uses SoftwareBitmap (GPU→CPU) at ≤30 FPS. Streaming path (phase 2) will prefer GPU textures." />
+            Text="Local preview is GPU→CPU SoftwareBitmap at ≤30 FPS. Built-in AirPlay uses the GPLv3 AirPlay-Windows sidecar (no AirServer required)." />
     </Grid>
 </Page>

@@ -75,25 +75,24 @@
       const row = document.createElement("div");
       row.className = "device";
       const controlOn = !!(d.controllerOnline ?? d.online);
-      const videoOn = !!d.videoAgentOnline;
       row.innerHTML = `
-        <span class="dot ${controlOn || videoOn ? "online" : ""}"></span>
+        <span class="dot ${controlOn ? "online" : ""}"></span>
         <div>
           <div class="name">${escapeHtml(d.name)}</div>
           <div class="meta muted">
-            control ${controlOn ? "online" : "offline"}
-            · video ${videoOn ? "online" : "offline"}
-            ${d.videoStreaming ? "· streaming" : ""}
+            HID ${controlOn ? "online" : "offline"}
             · last seen ${fmtLastSeen(d.lastSeen)}
             ${d.busy ? '· <span class="badge">in use</span>' : ""}
             ${d.controlledByYou ? '· <span class="badge">you</span>' : ""}
           </div>
+          ${controlOn ? "" : '<div class="meta muted">Registered — waiting for ESP (HID).</div>'}
         </div>
         <div class="spacer"></div>`;
       const btn = document.createElement("button");
       btn.className = "primary";
       btn.textContent = "Control";
-      btn.disabled = (!controlOn && !videoOn) || (d.busy && !d.controlledByYou);
+      // Owned devices are always openable so the panel can wait for the phone.
+      btn.disabled = !!(d.busy && !d.controlledByYou);
       btn.onclick = () => {
         location.href = "/controller.html?device=" + encodeURIComponent(d.id);
       };

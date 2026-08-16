@@ -82,6 +82,12 @@ export function normalizeAgentMessage(raw: Record<string, unknown>): AgentToServ
   if (typeof base.sdp === "undefined" && typeof base.Sdp === "string") {
     base.sdp = base.Sdp;
   }
+  if (typeof base.sessionId === "undefined" && typeof base.SessionId === "string") {
+    base.sessionId = base.SessionId;
+  }
+  if (typeof base.deviceId === "undefined" && typeof base.DeviceId === "string") {
+    base.deviceId = base.DeviceId;
+  }
 
   return base as unknown as AgentToServer;
 }

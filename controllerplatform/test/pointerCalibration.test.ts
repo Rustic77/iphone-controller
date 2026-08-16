@@ -83,6 +83,27 @@ describe("PointerCalibration", () => {
     expect(cal.planTap(0.5, 1.1)).toEqual([]);
   });
 
+  it("applyRelativeMove updates READY estimate so later taps stay aligned", () => {
+    const cal = new PointerCalibration();
+    cal.beginCalibrate();
+    cal.applyRelativeMove(20, 10);
+    expect(cal.estimatedX).toBe(20);
+    expect(cal.estimatedY).toBe(10);
+    const events = cal.planTap(0, 0);
+    const moves = events.filter((e) => e.kind === "move");
+    const sumX = moves.reduce((a, e) => a + (e.kind === "move" ? e.dx : 0), 0);
+    const sumY = moves.reduce((a, e) => a + (e.kind === "move" ? e.dy : 0), 0);
+    expect(sumX).toBe(-20);
+    expect(sumY).toBe(-10);
+  });
+
+  it("applyRelativeMove is a no-op until READY", () => {
+    const cal = new PointerCalibration();
+    cal.applyRelativeMove(99, 99);
+    expect(cal.estimatedX).toBe(0);
+    expect(cal.estimatedY).toBe(0);
+  });
+
   it("orientation change invalidates READY state", () => {
     const cal = new PointerCalibration();
     cal.beginCalibrate();

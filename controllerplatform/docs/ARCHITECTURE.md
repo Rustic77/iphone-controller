@@ -4,8 +4,11 @@
 
 Let an authenticated operator control a USB-HID iPhone rig (driven by an
 ESP32-S3) from a browser, over the Internet, **without exposing the ESP32** to
-inbound connections or requiring router port forwarding — and independently
-receive a live AirPlay-captured video stream from a Windows agent via WebRTC.
+inbound connections or requiring router port forwarding.
+
+The operator UI is **HID only** (trackpad, clicks, keys). A Windows video agent
+may still connect for local AirPlay capture, but the control panel does not
+subscribe to or display a live stream.
 
 ## Topology
 
@@ -70,7 +73,8 @@ The relay core and policy engine. Transport-agnostic via `Transport`
 - Track connected ESP devices (online/offline, last-seen, current controller).
 - Track connected video agents per `deviceId` (`streaming`, `webRtcConnected`,
   `videoSessionId`).
-- Track browser clients (control claim + optional video subscription).
+- Track browser clients (HID claim; video subscribe is optional and unused by
+  the controller UI).
 - Enforce tenant isolation and single-controller rules.
 - Route HID input to the claimed ESP only.
 - Relay WebRTC signaling **only** between an owner browser (claimed or
@@ -129,15 +133,15 @@ server: verifyDevice → Hub.addVideoAgent → {registered}
 server → owner's browsers: {devices} (videoAgentOnline=true)
 ```
 
-### Operator claims + video + tap
+### Operator claims HID
 ```
 browser → {claim, deviceId}
-Hub: owner? ESP online? free? → control session + auto video_subscribe
-     → {claimed}; agent ← {stream_start, sessionId}
-browser ↔ agent  (webrtc_* via hub, same deviceId + sessionId)
-browser → {calibrate_pointer} → ESP relative home moves
-browser → {tap_normalized, x, y} → chunked moves + click on ESP
+Hub: owner? ESP online? free? → control session → {claimed}
+browser → {input} → ESP HID (trackpad / clicks / keys)
 ```
+
+Claim does **not** auto-subscribe video. The controller page never sends
+`video_subscribe`.
 
 ### Independence
 ```
